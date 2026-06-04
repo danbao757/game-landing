@@ -2,47 +2,227 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <title>高考冲刺大作战</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      background: linear-gradient(135deg, #FF6B00, #FF9500);
-      display: flex; justify-content: center; align-items: center;
-      min-height: 100vh; font-family: 'PingFang SC', sans-serif;
-    }
-    .card {
-      background: #fff; border-radius: 20px; padding: 40px 30px;
-      text-align: center; width: 90%; max-width: 360px; box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-    }
-    h1 { font-size: 28px; color: #FF6B00; margin-bottom: 8px; }
-    .sub { font-size: 14px; color: #999; margin-bottom: 24px; }
-    .btn {
-      display: block; margin: 12px auto; width: 80%; padding: 14px;
-      font-size: 16px; font-weight: bold; color: #fff;
-      background: #FF6B00; border: none; border-radius: 25px;
-      text-decoration: none; box-shadow: 0 4px 12px rgba(255,107,0,0.3);
-    }
-    .btn-outline {
-      background: #fff; color: #FF6B00; border: 2px solid #FF6B00;
-    }
-    .footer { margin-top: 32px; font-size: 12px; color: #BBB; }
-  </style>
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div class="card">
-    <div style="font-size:60px">🎓</div>
-    <h1>高考冲刺大作战</h1>
-    <p class="sub">全场互动游戏 · 元服务体验</p>
 
-    <!-- 已上架后可以填入真实的App Linking链接 -->
-    <a href="https://hoas.drcn.agconnect.link/你的元服务链接" class="btn">📲 打开元服务</a>
-    <a href="#" class="btn btn-outline" onclick="alert('请在华为手机系统桌面上滑搜索「高考冲刺大作战」进入')">📥 如何找到元服务</a>
+<!-- ==================== 首页（主持人/观众入口） ==================== -->
+<div id="view-home" class="view active">
+  <div class="scroll-container">
+    <!-- Logo -->
+    <div class="home-logo">🎓</div>
+    <h1 class="home-title">高考冲刺大作战</h1>
+    <p class="home-subtitle">全场互动游戏</p>
 
-    <div class="footer">
-      请使用 HarmonyOS 手机扫码参与<br>一起为高考生加油 🎉
+    <!-- 故事简介 -->
+    <div class="home-intro">
+      <p>一个高三学生睡过头、高考迟到了</p>
+      <p class="highlight">全场合力，让他冲进考场！</p>
+    </div>
+
+    <!-- 二维码模块 -->
+    <div class="qr-section">
+      <p class="qr-icon">📱</p>
+      <p class="qr-title">现场观众扫码参与</p>
+      <p class="qr-desc">扫描二维码进入游戏，与全场一起互动</p>
+      <div id="qrcode-container"></div>
+      <p class="qr-url" id="qr-url-display"></p>
+      <p class="qr-tip">扫描后进入游戏互动</p>
+    </div>
+
+    <!-- 主持人入口 -->
+    <button class="btn-primary" onclick="startCountdown()">🎬 主持人入口 · 进入大屏幕模式</button>
+    <p class="home-hint">主持人模式用于舞台大屏幕演示</p>
+
+    <!-- 观众入口 -->
+    <button class="btn-outline" onclick="enterAudience()">📱 我是观众 · 扫码后点这里</button>
+  </div>
+</div>
+
+<!-- ==================== 规则页（倒计时） ==================== -->
+<div id="view-rule" class="view">
+  <div class="rule-header">
+    <p class="rule-countdown-label">游戏即将开始</p>
+    <p class="rule-countdown">倒计时：<span id="countdown-num" class="countdown-num">30</span> 秒</p>
+  </div>
+  <div class="scroll-container">
+    <div class="card">
+      <h2 class="card-title">📖 故事背景</h2>
+      <p class="card-text">一个高三学生睡过头、高考迟到了。<br>每一轮你们输入一句话帮他推进剧情，AI在后台拼命阻挠。<br>全场合力，让他冲进考场！</p>
+    </div>
+    <div class="card">
+      <h2 class="card-title">📋 游戏规则</h2>
+      <ol class="rule-list">
+        <li>扫大屏幕上的码，打开网页</li>
+        <li>阅读故事背景，了解当前剧情</li>
+        <li>输入一句话帮助主角推进剧情</li>
+        <li>给其他选手的投稿点赞</li>
+        <li>AI会随机挑选一条续写并加码困难</li>
+        <li>循环推进，合力让主角冲进考场</li>
+      </ol>
+    </div>
+  </div>
+  <div class="bottom-bar">
+    <button class="btn-primary btn-wide" onclick="startGame()">立即开始游戏 🚀</button>
+  </div>
+</div>
+
+<!-- ==================== 游戏页（主持人模式） ==================== -->
+<div id="view-game" class="view">
+  <!-- 顶部栏 -->
+  <div class="game-header">
+    <div>
+      <p class="header-round">第 <span id="round-num">1</span> / 4 关</p>
+      <p class="header-phase" id="header-phase"></p>
+    </div>
+    <span class="header-count" id="submission-count">🔥 0条投稿</span>
+  </div>
+
+  <div class="scroll-container game-scroll">
+    <!-- 剧情进展 -->
+    <div class="card">
+      <div class="card-title-row">
+        <h2 class="card-title">📚 剧情进展</h2>
+        <span class="badge" id="round-badge">第1关</span>
+      </div>
+      <div class="story-text" id="story-text"></div>
+      <button class="toggle-story" id="toggle-story-btn" onclick="toggleStory()">
+        ▼ 展开完整剧情
+      </button>
+    </div>
+
+    <!-- 分支选择（第一阶段隐藏） -->
+    <div class="card" id="branch-card" style="display:none">
+      <h2 class="card-title">🔀 前方出现三个岔路口，请选择你的路线！</h2>
+      <div class="loading-spinner" id="branch-loading">
+        <div class="spinner"></div>
+        <p>AI正在生成路线...</p>
+      </div>
+      <div id="branch-options" class="branch-options"></div>
+    </div>
+
+    <!-- AI策略按钮 -->
+    <div class="strategy-buttons" id="strategy-buttons">
+      <button class="btn-strategy btn-random" id="btn-random" onclick="triggerAI('random')">
+        🎲 命运之抽
+      </button>
+      <button class="btn-strategy btn-top" id="btn-top" onclick="triggerAI('highest')">
+        📊 众望所归
+      </button>
+      <p class="strategy-hint">「命运之抽」随机选一条投稿，「众望所归」选票数最高的投稿</p>
+    </div>
+
+    <!-- 观众投稿区（主持人模式） -->
+    <div class="card" id="submissions-card">
+      <h2 class="card-title">🔥 实时投稿墙 <span class="badge-sm" id="submission-count-sm"></span></h2>
+      <div id="submissions-list" class="submissions-list"></div>
     </div>
   </div>
 </div>
+
+<!-- ==================== 观众模式 ==================== -->
+<div id="view-audience" class="view">
+  <div class="audience-header">
+    <button class="btn-back" onclick="showView('home')">← 返回</button>
+    <p class="audience-title">📱 观众投稿模式</p>
+    <span class="badge" id="audience-count">0条</span>
+  </div>
+
+  <!-- 昵称输入 -->
+  <div class="card" id="nickname-card">
+    <h2 class="card-title">🎯 给自己起个昵称</h2>
+    <input type="text" class="input" id="nickname-input" placeholder="让大屏幕上的大家认识你~" maxlength="12">
+    <button class="btn-primary btn-full" onclick="confirmNickname()">确认进入 🚀</button>
+    <p class="hint">你的昵称会显示在大屏幕上哦</p>
+  </div>
+
+  <!-- 投稿区（昵称确认后显示） -->
+  <div id="audience-submit-area" style="display:none">
+    <div class="card">
+      <div class="nickname-row">
+        <span class="nickname-display" id="nickname-display"></span>
+        <button class="btn-text" onclick="changeNickname()">✏️ 修改昵称</button>
+      </div>
+      <textarea class="textarea" id="audience-input" placeholder="分享你的赶考妙招，给高考生加油打气！（最多200字）" maxlength="200"></textarea>
+      <div class="input-footer">
+        <span class="char-count" id="char-count">0/200</span>
+        <button class="btn-primary" id="submit-btn" onclick="submitAudienceTip()">📨 投稿到大屏幕</button>
+      </div>
+    </div>
+
+    <!-- 投稿墙 -->
+    <div class="wall-header">
+      <p class="wall-title">🔥 实时投稿墙</p>
+      <span class="badge-sm" id="audience-wall-count">共 0 条</span>
+    </div>
+    <div id="audience-submissions" class="submissions-list"></div>
+  </div>
+
+  <div class="bottom-bar">
+    <p>🟢 已连接大屏幕 · 实时同步中</p>
+  </div>
+</div>
+
+<!-- ==================== 答题页 ==================== -->
+<div id="view-quiz" class="view">
+  <div class="quiz-header">
+    <p class="quiz-progress">第 <span id="quiz-num">1</span> / 5 题</p>
+    <div class="quiz-progress-bar"><div class="quiz-progress-fill" id="quiz-progress-fill"></div></div>
+  </div>
+  <div class="scroll-container">
+    <div class="card">
+      <h2 class="quiz-question" id="quiz-question"></h2>
+    </div>
+    <div id="quiz-options" class="quiz-options"></div>
+  </div>
+</div>
+
+<!-- ==================== 结果页 ==================== -->
+<div id="view-result" class="view">
+  <div class="scroll-container">
+    <div class="result-emoji" id="result-emoji"></div>
+    <h1 class="result-type" id="result-type"></h1>
+    <p class="result-name" id="result-name"></p>
+    <div class="card">
+      <p class="result-desc" id="result-desc"></p>
+    </div>
+    <div class="card">
+      <h2 class="card-title">🌟 给你的高考祝福</h2>
+      <p class="result-blessing" id="result-blessing"></p>
+    </div>
+    <div class="card">
+      <h2 class="card-title">💡 冲刺建议</h2>
+      <p class="result-advice" id="result-advice"></p>
+    </div>
+    <div class="card">
+      <h2 class="card-title">📊 人格维度</h2>
+      <div id="dimensions" class="dimensions"></div>
+    </div>
+    <button class="btn-primary btn-wide" onclick="restartGame()">🔄 再来一次</button>
+  </div>
+</div>
+
+<!-- 结局弹窗 -->
+<div class="modal-overlay" id="outcome-modal" style="display:none">
+  <div class="modal-card">
+    <p class="modal-emoji" id="outcome-emoji"></p>
+    <h2 class="modal-title" id="outcome-title"></h2>
+    <p class="modal-msg" id="outcome-msg"></p>
+    <button class="btn-primary btn-wide" onclick="closeOutcomeAndStartQuiz()">查看人格测试 →</button>
+  </div>
+</div>
+
+<!-- AI加载弹窗 -->
+<div class="modal-overlay" id="ai-loading-modal" style="display:none">
+  <div class="modal-card">
+    <div class="spinner"></div>
+    <p class="modal-loading-text">AI正在生成剧情...</p>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+<script src="game.js"></script>
 </body>
 </html>
