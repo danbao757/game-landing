@@ -146,6 +146,18 @@ body {
 
 .game-scroll { padding-bottom: 100px; }
 
+/* 角色标签 */
+.role-badge {
+  font-size: 11px; padding: 3px 8px; border-radius: 10px; white-space: nowrap;
+  font-weight: 600;
+}
+.role-badge.role-host { background: #FFF3E0; color: #FF6B00; }
+.role-badge.role-audience { background: #E3F2FD; color: #1976D2; }
+
+/* 观众输入区 */
+#audience-input-card { margin-top: 0; }
+#audience-input-card .textarea { height: 80px; }
+
 /* ========== 剧情文本 ========== */
 .story-text {
   font-size: 14px; color: #555; line-height: 1.8; white-space: pre-wrap;
@@ -221,14 +233,13 @@ body {
   border-radius: 6px; white-space: nowrap;
 }
 
-/* ========== 观众模式 ========== */
-.audience-header {
-  background: var(--white); padding: 12px 16px;
-  display: flex; justify-content: space-between; align-items: center;
-}
-.audience-title { font-size: 18px; font-weight: 700; }
-
+/* ========== 表单 ========== */
 .input {
+  width: 100%; padding: 12px 16px; font-size: 16px;
+  background: #F8F8F8; border: 1px solid #E0E0E0; border-radius: 12px;
+  margin: 12px 0; outline: none;
+}
+.input:focus { border-color: var(--orange); }
   width: 100%; padding: 12px 16px; font-size: 16px;
   background: #F8F8F8; border: 1px solid #E0E0E0; border-radius: 12px;
   margin: 12px 0; outline: none;

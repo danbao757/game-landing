@@ -1,500 +1,537 @@
 /* ============================================================
- * 高考冲刺大作战 - 游戏核心逻辑
+ * 高考冲刺大作战 - 游戏核心逻辑 v3
+ * 主持人/观众共用同一游戏视图，观众可看可投可赞不可发指令
  * ============================================================ */
 
-// ─── ZhiPu AI 配置 ───
-const ZHIPU_API_URL = 'https://open.bigmodel.cn/api/paas/v4/chat/completions';
-const ZHIPU_API_KEY = '7bf6eb414d39415baf72cd7ca57f56a1.StEPo8uIFfPtfTvf';
+// ─── 智谱AI ───
+const ZHIPU = 'https://open.bigmodel.cn/api/paas/v4/chat/completions';
+const ZHIPU_KEY = '7bf6eb414d39415baf72cd7ca57f56a1.StEPo8uIFfPtfTvf';
 
-// ─── 全局状态 ───
-let currentRound = 1;
-const totalRounds = 4;
-let gamePhase = 'input'; // 'input' | 'branch' | 'quiz' | 'result'
-let storyText = `高三学生小明睡过头了，闹钟响了三遍都没听到。
+// ─── 角色 ───
+let role = 'host'; // 'host' | 'audience'
+let audienceNick = '';
+
+// ─── 游戏状态 ───
+let rnd = 1;
+let phase = 'input';           // 'input' | 'branch'
+let story = `高三学生小明睡过头了，闹钟响了三遍都没听到。
 当他终于醒来时，距离高考开始只剩30分钟！
 而考场在城市的另一端，正常情况下需要40分钟车程...`;
-
-let submissions = [];
-let likedSubmissionId = '';
+let subs = [];
+let myLikeId = '';
 let branches = [];
-let selectedBranch = -1;
-let selectedSuggestion = '';
-let aiStrategy = '';
-let finalOutcome = '';
-let storyExpanded = false;
-let isAILoading = false;
+let outcome = '';
+let storyOpen = false;
+let aiBusy = false;
 
-// 计时器
-let audienceTimerId = null;
-let countdownTimerId = null;
+let simTimer = null;
+let cdTimer = null;
 
-// 观众模式
-let isAudienceMode = false;
-let audienceNickname = '';
-let audienceSubmissions = [];
+let qIndex = 0;
+let qAnswers = new Map();
 
-// 答题
-let quizQuestions = [];
-let currentQuizIndex = 0;
-let answers = new Map();
-
-// ─── 页面加载 ───
+// ─── 页面初始化 ───
 document.addEventListener('DOMContentLoaded', () => {
-  initQRCode();
-  initStory();
+  const p = new URLSearchParams(location.search);
+  if (p.get('mode') === 'audience') {
+    role = 'audience';
+    enterAudienceGame();
+  } else {
+    showView('home');
+  }
+  initQR();
 });
 
-// ─── 视图切换 ───
-function showView(viewName) {
-  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-  const viewEl = document.getElementById('view-' + viewName);
-  if (viewEl) viewEl.classList.add('active');
-  window.scrollTo(0, 0);
-}
-
 // ─── 二维码 ───
-function initQRCode() {
-  const url = window.location.href.split('?')[0];
-  document.getElementById('qr-url-display').textContent = url;
+function initQR() {
+  const base = location.href.split('?')[0];
+  const audienceUrl = base + '?mode=audience';
+  document.getElementById('qr-url-display').textContent = audienceUrl;
   try {
     new QRCode(document.getElementById('qrcode-container'), {
-      text: url, width: 200, height: 200,
-      colorDark: '#333333', colorLight: '#ffffff',
-      correctLevel: QRCode.CorrectLevel.M
+      text: audienceUrl, width: 200, height: 200,
+      colorDark: '#333', colorLight: '#fff', correctLevel: QRCode.CorrectLevel.M
     });
   } catch (e) {
     document.getElementById('qrcode-container').innerHTML =
-      '<p style="font-size:14px;color:#FF6B00;">二维码生成失败<br>请复制上方链接分享</p>';
+      '<p style="font-size:14px;color:#FF6B00">二维码生成失败<br>请复制上方链接分享</p>';
   }
+}
+
+// ─── 视图 ───
+function showView(name) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  const el = document.getElementById('view-' + name);
+  if (el) el.classList.add('active');
+  window.scrollTo(0, 0);
 }
 
 // ─── 倒计时 ───
 function startCountdown() {
+  role = 'host';
   showView('rule');
-  let countdown = 30;
-  const numEl = document.getElementById('countdown-num');
-  numEl.textContent = countdown;
-  numEl.className = 'countdown-num';
-  countdownTimerId = setInterval(() => {
-    countdown--;
-    numEl.textContent = countdown;
-    if (countdown <= 10) numEl.className = 'countdown-num danger';
-    else if (countdown <= 20) numEl.className = 'countdown-num warning';
-    if (countdown <= 0) {
-      clearInterval(countdownTimerId);
-      startGame();
-    }
+  document.getElementById('rule-countdown-label').textContent = '游戏即将开始';
+  let n = 30;
+  const el = document.getElementById('countdown-num');
+  el.textContent = n; el.className = 'countdown-num';
+  if (cdTimer) clearInterval(cdTimer);
+  cdTimer = setInterval(() => {
+    n--;
+    el.textContent = n;
+    if (n <= 10) el.className = 'countdown-num danger';
+    else if (n <= 20) el.className = 'countdown-num warning';
+    if (n <= 0) { clearInterval(cdTimer); initGame(); }
   }, 1000);
 }
 
-// ─── 开始游戏 ───
-function startGame() {
-  if (countdownTimerId) clearInterval(countdownTimerId);
-  currentRound = 1;
-  gamePhase = 'input';
-  storyText = `高三学生小明睡过头了，闹钟响了三遍都没听到。
-当他终于醒来时，距离高考开始只剩30分钟！
-而考场在城市的另一端，正常情况下需要40分钟车程...`;
-  submissions = getMockSubmissions(1);
-  likedSubmissionId = '';
-  branches = [];
-  selectedBranch = -1;
-  selectedSuggestion = '';
-  aiStrategy = '';
-  finalOutcome = '';
-  storyExpanded = false;
-  isAILoading = false;
-  answers = new Map();
-  currentQuizIndex = 0;
-  showView('game');
-  updateGameUI();
-  startAudienceSimulation();
+function enterAudienceGame() {
+  role = 'audience';
+  showView('rule');
+  document.getElementById('rule-countdown-label').textContent = '📱 观众模式 · 即将进入游戏';
+  let n = 10;
+  const el = document.getElementById('countdown-num');
+  el.textContent = n; el.className = 'countdown-num';
+  if (cdTimer) clearInterval(cdTimer);
+  cdTimer = setInterval(() => {
+    n--;
+    el.textContent = n;
+    if (n <= 10) el.className = 'countdown-num danger';
+    if (n <= 0) { clearInterval(cdTimer); initGame(); }
+  }, 1000);
 }
 
-// ─── 更新游戏界面 ───
-function updateGameUI() {
-  document.getElementById('round-num').textContent = currentRound;
-  document.getElementById('round-badge').textContent = '第' + currentRound + '关';
-  document.getElementById('submission-count').textContent = '🔥 ' + submissions.length + '条投稿';
-  document.getElementById('submission-count-sm').textContent = '共 ' + submissions.length + ' 条';
+function enterAudienceFromHome() {
+  location.href = location.href.split('?')[0] + '?mode=audience';
+}
 
-  const phaseEl = document.getElementById('header-phase');
-  if (gamePhase === 'branch') phaseEl.textContent = '🔀 请选择一个路线';
-  else phaseEl.textContent = '';
+// ─── 初始化游戏 ───
+function initGame() {
+  if (cdTimer) { clearInterval(cdTimer); cdTimer = null; }
+  rnd = 1; phase = 'input'; outcome = ''; storyOpen = false; aiBusy = false;
+  branches = []; myLikeId = '';
+  qIndex = 0; qAnswers = new Map();
+  story = `高三学生小明睡过头了，闹钟响了三遍都没听到。
+当他终于醒来时，距离高考开始只剩30分钟！
+而考场在城市的另一端，正常情况下需要40分钟车程...`;
+  subs = getMockSubs(1);
+  if (role === 'audience') {
+    subs.push({
+      id: 'aud_init_1', content: '趁闹钟刚响赶紧出门，别磨蹭！',
+      likes: 6, timestamp: Date.now() - 30000, userName: '热心观众'
+    });
+  }
+  showView('game');
+  updateUI();
+  if (role === 'host') startSim();
+}
+
+// ─── UI刷新 ───
+function updateUI() {
+  document.getElementById('round-num').textContent = rnd;
+  document.getElementById('round-badge').textContent = '第' + rnd + '关';
+  document.getElementById('submission-count').textContent = '🔥 ' + subs.length + '条投稿';
+  document.getElementById('submission-count-sm').textContent = '共 ' + subs.length + ' 条';
+
+  // 角色
+  const roleEl = document.getElementById('role-badge');
+  roleEl.textContent = role === 'host' ? '🎬 主持人' : '📱 观众';
+  roleEl.className = 'role-badge ' + (role === 'host' ? 'role-host' : 'role-audience');
+
+  // 观众输入区
+  document.getElementById('audience-input-card').style.display = role === 'audience' ? '' : 'none';
+
+  // 阶段提示
+  const phEl = document.getElementById('header-phase');
+  if (phase === 'branch') {
+    phEl.textContent = '🔀 请选择一个路线';
+  } else {
+    phEl.textContent = role === 'audience' ? '等待主持人选择策略…' : '请点击「命运之抽」或「众望所归」';
+  }
 
   renderStory();
-  renderSubmissions();
+  renderSubs();
 
-  if (gamePhase === 'input') {
+  if (phase === 'input') {
     document.getElementById('branch-card').style.display = 'none';
-    document.getElementById('strategy-buttons').style.display = '';
-    updateStrategyButtons();
+    document.getElementById('strategy-area').style.display = '';
+    updateStrategyBtns();
   } else {
     document.getElementById('branch-card').style.display = '';
-    document.getElementById('strategy-buttons').style.display = 'none';
+    document.getElementById('strategy-area').style.display = 'none';
     renderBranches();
   }
 }
 
-// ─── 剧情渲染 ───
+// ─── 剧情 ───
 function renderStory() {
-  let text = cleanStoryText(storyText);
-  if (currentRound > 1 && !storyExpanded) {
-    const parts = text.split(/\n\n(?=【选择路径】|小明|他|突然|这时|此时|路上|考场|距离|眼看|就在|终于)/);
-    if (parts.length > 3) {
-      text = parts[0] + '\n\n··· 以上剧情已折叠 ···\n\n' + parts.slice(-2).join('\n\n');
+  let t = cleanStory(story);
+  if (rnd > 1 && !storyOpen) {
+    const lines = t.split('\n');
+    if (lines.length > 8) {
+      t = lines.slice(0, 3).join('\n') + '\n\n··· 以上剧情已折叠 ···\n\n' + lines.slice(-4).join('\n');
       document.getElementById('toggle-story-btn').style.display = '';
       document.getElementById('toggle-story-btn').textContent = '▼ 展开完整剧情';
     } else {
       document.getElementById('toggle-story-btn').style.display = 'none';
     }
   } else {
-    document.getElementById('toggle-story-btn').style.display = currentRound > 1 ? '' : 'none';
-    document.getElementById('toggle-story-btn').textContent = storyExpanded ? '▲ 收起历史剧情' : '▼ 展开完整剧情';
+    document.getElementById('toggle-story-btn').style.display = rnd > 1 ? '' : 'none';
+    document.getElementById('toggle-story-btn').textContent = storyOpen ? '▲ 收起' : '▼ 展开完整剧情';
   }
-  document.getElementById('story-text').textContent = text;
+  document.getElementById('story-text').textContent = t;
 }
 
 function toggleStory() {
-  storyExpanded = !storyExpanded;
-  const text = cleanStoryText(storyText);
-  document.getElementById('story-text').textContent = text;
-  document.getElementById('toggle-story-btn').textContent = storyExpanded ? '▲ 收起历史剧情' : '▼ 展开完整剧情';
+  storyOpen = !storyOpen;
+  document.getElementById('story-text').textContent = cleanStory(story);
+  document.getElementById('toggle-story-btn').textContent = storyOpen ? '▲ 收起' : '▼ 展开完整剧情';
 }
 
-function cleanStoryText(text) {
-  return text
-    .replace(/续写\d+-\d+字/g, '').replace(/\[续写\d+-\d+字\]/g, '')
-    .replace(/【故事续写】/g, '').trim();
+function cleanStory(s) {
+  return s.replace(/续写\d+-\d+字/g, '').replace(/\[续写\d+-\d+字\]/g, '').replace(/【故事续写】/g, '').trim();
 }
 
 // ─── 策略按钮 ───
-function updateStrategyButtons() {
-  const randomBtn = document.getElementById('btn-random');
-  const topBtn = document.getElementById('btn-top');
-  randomBtn.disabled = isAILoading || submissions.length === 0;
-  topBtn.disabled = isAILoading || submissions.length === 0;
-  randomBtn.textContent = isAILoading ? '⏳ 生成中...' : '🎲 命运之抽';
-  topBtn.textContent = isAILoading ? '⏳ 生成中...' : '📊 众望所归';
+function updateStrategyBtns() {
+  const rBtn = document.getElementById('btn-random');
+  const tBtn = document.getElementById('btn-top');
+  const hint = document.getElementById('strategy-hint');
+
+  if (role === 'audience') {
+    rBtn.disabled = true; tBtn.disabled = true;
+    rBtn.textContent = '🎲 命运之抽（主持人）';
+    tBtn.textContent = '📊 众望所归（主持人）';
+    rBtn.title = '等待主持人操作'; tBtn.title = '等待主持人操作';
+    hint.textContent = '你是观众模式，策略选择由主持人决定';
+  } else {
+    rBtn.disabled = aiBusy || subs.length === 0;
+    tBtn.disabled = aiBusy || subs.length === 0;
+    rBtn.textContent = aiBusy ? '⏳ 生成中…' : '🎲 命运之抽';
+    tBtn.textContent = aiBusy ? '⏳ 生成中…' : '📊 众望所归';
+    hint.textContent = '「命运之抽」随机选一条投稿，「众望所归」选票数最高的投稿';
+  }
+}
+
+// ─── 观众投稿 ───
+function submitAudienceTip() {
+  if (role !== 'audience') return;
+  const input = document.getElementById('audience-tip-input');
+  const text = input.value.trim();
+  if (!text) return;
+  if (text.length > 200) { alert('最多200字'); return; }
+  subs.push({
+    id: 'tip_' + Date.now(), content: text, likes: 0,
+    timestamp: Date.now(),
+    userName: audienceNick || ('观众' + Math.floor(Math.random() * 9000 + 1000))
+  });
+  input.value = '';
+  updateUI();
+  document.getElementById('submissions-card').scrollIntoView({ behavior: 'smooth' });
 }
 
 // ─── 触发AI ───
 async function triggerAI(strategy) {
-  if (isAILoading) return;
-  aiStrategy = strategy;
-
-  let picked = null;
-  if (strategy === 'highest') picked = getHighestVoted();
-  else picked = getRandomSubmission();
-
-  if (!picked) { alert('请先投稿！'); return; }
-
-  selectedSuggestion = picked.content;
-  isAILoading = true;
-  updateStrategyButtons();
-  showAILoading(true);
-
+  if (role !== 'host') { alert('只有主持人可以操作！'); return; }
+  if (aiBusy) return;
+  let picked = strategy === 'highest' ? getTopSub() : getRandomSub();
+  if (!picked) { alert('请先让观众投稿！'); return; }
+  aiBusy = true;
+  updateStrategyBtns();
+  showAIModal(true);
   try {
-    const result = await callZhipuAI(storyText, picked.content, currentRound);
-    if (result.success) {
-      storyText = storyText + '\n\n' + cleanStoryText(result.storyContinuation);
-      branches = result.branches;
-      finalOutcome = result.finalOutcome || '';
-      storyExpanded = false;
-      gamePhase = 'branch';
-      selectedBranch = -1;
-      updateGameUI();
+    const res = await callAI(story, picked.content, rnd);
+    if (res.success) {
+      story = story + '\n\n' + cleanStory(res.continuation);
+      branches = validateBranches(res.branches, picked.content);
+      outcome = res.finalOutcome || '';
+      storyOpen = false;
+      phase = 'branch';
+      updateUI();
     } else {
-      alert('AI生成失败: ' + (result.error || '请重试'));
+      alert('AI生成失败: ' + (res.error || '请重试'));
     }
   } catch (e) {
     alert('网络错误，请检查网络后重试');
   } finally {
-    isAILoading = false;
-    showAILoading(false);
-    updateGameUI();
+    aiBusy = false;
+    showAIModal(false);
+    if (phase === 'input') updateUI();
   }
 }
 
-function showAILoading(show) {
-  const modal = document.getElementById('ai-loading-modal');
-  modal.style.display = show ? 'flex' : 'none';
+function showAIModal(show) {
+  document.getElementById('ai-loading-modal').style.display = show ? 'flex' : 'none';
 }
 
-// ─── 智谱AI调用 ───
-async function callZhipuAI(currentStory, selectedInput, roundNumber) {
-  const roundTheme = getRoundTheme(roundNumber);
-  const consistency = buildConsistencyConstraint(currentStory, selectedInput);
-  let predeterminedOutcome = '';
-  if (roundNumber === 4) predeterminedOutcome = Math.random() < 0.6 ? '失败' : '成功';
+// ─── AI调用（单次请求，不再重试） ───
+async function callAI(curStory, selInput, roundNum) {
+  const theme = getTheme(roundNum);
+  const consist = buildConsistency(curStory, selInput);
+  let preOutcome = '';
+  if (roundNum === 4) preOutcome = Math.random() < 0.6 ? '失败' : '成功';
 
-  const playerConstraint = `\n🔴【硬性约束 — 玩家行动已发生，绝不可推翻】🔴\n小明已经做了以下事情（这是已经发生的事实，不是建议）：${selectedInput}\n\n你的任务：延续这个已发生的事实，展开接下来的发展。\n\n分支应该围绕"在当前状态下会发生什么"来展开，而非"换一种出行方式"。`;
+  const playerConst = `
+🔴【硬性约束 — 玩家行动已发生，绝不可推翻】🔴
+小明已经做了以下事情（已发生的事实）：${selInput}
 
-  const systemPrompt = `你是写实故事作家。请续写60字以内的故事进展。
+你的任务：延续这个已发生的事实展开。
 
-${roundTheme}
-${playerConstraint}
-${consistency}
+绝对禁止：分支中出现与已执行行动矛盾的交通工具/出行方式。
+例如玩家选了"爸爸开车送"，分支绝不能写"骑单车""跑步""打车"等。
+正确做法：分支围绕"当前状态下遇到什么情况"展开（如堵车/抄近路/抛锚/封路等）。`;
 
-规定输出（严格按此格式，三项分支缺一不可，每项都必须有标题和描述）：
+  const sys = `你是写实故事作家。续写60字以内。
+
+${theme}
+${playerConst}
+${consist}
+
+格式（严格）：
 【故事续写】
-(在此续写故事)
-【分支一】标题：[5字内] 描述：[一句话描述这个选择的具体场景，不少于10字] 难度：简单
-【分支二】标题：[5字内] 描述：[一句话描述这个选择的具体场景，不少于10字] 难度：中等
-【分支三】标题：[5字内] 描述：[一句话描述这个选择的具体场景，不少于10字] 难度：困难
-${roundNumber === 4 ? `【结局判定】故事最终结局必须为【${predeterminedOutcome}】，请严格按照这个结果来写结局` : ''}`;
+(在此续写)
+【分支一】标题：[5字内] 描述：[不少于10字] 难度：简单
+【分支二】标题：[5字内] 描述：[不少于10字] 难度：中等
+【分支三】标题：[5字内] 描述：[不少于10字] 难度：困难
+${roundNum === 4 ? '【结局判定】最终结局必须为【' + preOutcome + '】，严格按此写结局' : ''}`;
 
-  const trimmedStory = currentStory.length > 1500
-    ? currentStory.slice(0, 200) + '\n···（中间剧情已折叠）···\n' + currentStory.slice(-1300)
-    : currentStory;
+  const trimmed = curStory.length > 1200
+    ? curStory.slice(0, 200) + '\n···（中间剧情已折叠）···\n' + curStory.slice(-1000)
+    : curStory;
+  const user = `已确定的行动：${selInput}\n当前剧情：${trimmed}`;
 
-  const userPrompt = `已确定的玩家行动（已发生）：${selectedInput}\n当前完整剧情：${trimmedStory}`;
+  try {
+    const resp = await fetch(ZHIPU, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + ZHIPU_KEY },
+      body: JSON.stringify({
+        model: 'glm-4-flash',
+        messages: [{ role: 'system', content: sys }, { role: 'user', content: user }],
+        max_tokens: 500, temperature: 0.6
+      })
+    });
+    if (!resp.ok) return fail('API错误: ' + resp.status);
+    const data = await resp.json();
+    const txt = data.choices?.[0]?.message?.content || '';
+    if (!txt) return fail('AI返回为空');
 
-  // 最多重试2次
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const resp = await fetch(ZHIPU_API_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + ZHIPU_API_KEY },
-        body: JSON.stringify({
-          model: 'glm-4-flash',
-          messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
-          max_tokens: 1000, temperature: 0.7
-        })
-      });
+    const cont = (txt.match(/【故事续写】\s*([\s\S]*?)(?=【分支一】|$)/) || [])[1]?.trim() || txt.substring(0, 100);
+    const brs = parseBranches(txt);
+    let oc = '';
+    if (roundNum === 4) oc = preOutcome === '成功' ? 'success' : 'failure';
+    return { success: true, continuation: cont, branches: brs, finalOutcome: oc };
+  } catch (e) {
+    return fail('网络错误');
+  }
+}
 
-      if (!resp.ok) {
-        if (attempt === 0) { await sleep(1000); continue; }
-        return { success: false, storyContinuation: '', branches: [], error: 'API错误: ' + resp.status };
-      }
+function parseBranches(txt) {
+  const brs = [];
+  const labels = ['一', '二', '三'];
+  const icons = ['🛵', '🚗', '🏃'];
+  const fallbacks = [
+    { title: '谨慎绕行', description: '走小路绕开拥堵', difficulty: '简单' },
+    { title: '主路直冲', description: '走大路全速前进', difficulty: '中等' },
+    { title: '冒险一搏', description: '铤而走险赌一把', difficulty: '困难' }
+  ];
+  for (let i = 0; i < 3; i++) {
+    const re = new RegExp('【分支' + labels[i] + '】[\\s\\S]*?标题[：:]\\s*([^\\n]+?)\\s*描述[：:]\\s*([^\\n]+?)\\s*(?:难度[：:]\\s*([^\\n]+?))?(?=\\s*(?:【分支|【结局|$))');
+    const m = txt.match(re);
+    const title = (m?.[1] || fallbacks[i].title).trim();
+    let desc = (m?.[2] || fallbacks[i].description).trim();
+    desc = desc.replace(/不少于\d+字/g, '').replace(/一句话描述/g, '').replace(/\[[^\]]*\]/g, '').trim();
+    if (desc.length < 2) desc = fallbacks[i].description;
+    const diff = ((m?.[3] || fallbacks[i].difficulty).trim()).replace(/难度[：:]\s*/g, '');
+    brs.push({ id: i + 1, title, description: desc, icon: icons[i], difficulty: diff });
+  }
+  return brs;
+}
 
-      const data = await resp.json();
-      const response = data.choices?.[0]?.message?.content || '';
-      if (!response) {
-        if (attempt === 0) { await sleep(1000); continue; }
-        return { success: false, storyContinuation: '', branches: [], error: 'AI返回为空' };
-      }
+function fail(msg) { return { success: false, continuation: '', branches: [], error: msg }; }
 
-      const storyMatch = response.match(/【故事续写】\s*([\s\S]*?)(?=【分支一】|$)/);
-      const continuation = storyMatch?.[1]?.trim() || response.substring(0, 100);
+// ─── 剧情一致性校验 ───
+function validateBranches(brs, selInput) {
+  let banWords = [];
+  const a = selInput;
+  if (/开车|爸爸|坐车/.test(a)) banWords = ['骑', '单车', '自行车', '跑步', '狂奔', '跑着', '走路', '步行', '打车', '出租', '网约', '叫车'];
+  else if (/单车|骑车|自行车/.test(a)) banWords = ['开车', '打车', '出租', '网约', '叫车', '公交', '地铁', '坐车', '爸爸开车'];
+  else if (/打车|出租|网约|叫车/.test(a)) banWords = ['骑', '单车', '自行车', '跑步', '狂奔', '跑着', '走路', '步行', '爸爸开车'];
+  else if (/公交|地铁/.test(a)) banWords = ['骑', '单车', '自行车', '跑步', '狂奔', '跑着', '打车', '出租', '网约', '叫车', '开车'];
+  else if (/跑步|狂奔|跑过去|跑着/.test(a)) banWords = ['开车', '打车', '出租', '网约', '叫车', '骑', '单车', '自行车', '公交', '地铁', '坐车'];
+  if (banWords.length === 0) return brs;
 
-      // 提取3个分支
-      const branches = [];
-      for (let i = 1; i <= 3; i++) {
-        const label = ['', '一', '二', '三'][i];
-        const regex = new RegExp(`【分支${label}】[\\s\\S]*?标题[：:]\\s*([^\\n]+?)\\s*描述[：:]\\s*([^\\n]+?)\\s*(?:难度[：:]\\s*([^\\n]+?))?(?=\\s*(?:【分支|【结局|$))`);
-        const match = response.match(regex);
-        const title = match?.[1]?.trim() || ['绕行小路', '主路冲刺', '冒险捷径'][i-1];
-        let desc = match?.[2]?.trim() || ['穿居民区小路', '主干道打车出发', '横穿工地'][i-1];
-        desc = desc.replace(/不少于\d+字/g, '').replace(/一句话描述这个选择的具体场景/g, '').replace(/\[[^\]]*\]/g, '').trim();
-        if (desc.length < 2) desc = ['穿居民区小路', '主干道打车出发', '横穿工地'][i-1];
-        const difficulty = (match?.[3]?.trim() || ['简单', '中等', '困难'][i-1]).replace(/难度[：:]\s*/g, '');
-        branches.push({
-          id: i, title, description: desc,
-          icon: ['🛵', '🚗', '🏃'][i-1],
-          difficulty: difficulty
-        });
-      }
-
-      if (branches.length < 3) {
-        if (attempt === 0) { await sleep(1000); continue; }
-      }
-
-      let outcome = '';
-      if (roundNumber === 4) outcome = predeterminedOutcome === '成功' ? 'success' : 'failure';
-
-      return { success: true, storyContinuation: continuation, branches, finalOutcome: outcome };
-    } catch (e) {
-      if (attempt === 0) { await sleep(1000); continue; }
-      return { success: false, storyContinuation: '', branches: [], error: '网络错误' };
+  const fbs = [
+    { title: '继续前行', description: '继续赶路，前方出现新变化', icon: '🛣️', difficulty: '简单' },
+    { title: '遇到阻碍', description: '路途不顺利，需要想办法解决', icon: '⚠️', difficulty: '中等' },
+    { title: '紧急决策', description: '时间紧迫，必须快速做决定', icon: '⏰', difficulty: '困难' }
+  ];
+  let fi = 0;
+  return brs.map(b => {
+    if (banWords.some(w => (b.title + b.description).includes(w))) {
+      const fb = fbs[fi % fbs.length]; fi++;
+      return { id: b.id, title: fb.title, description: fb.description, icon: fb.icon, difficulty: fb.difficulty };
     }
-  }
-  return { success: false, storyContinuation: '', branches: [], error: '多次重试失败' };
+    return b;
+  });
 }
 
-function getRoundTheme(round) {
-  const themes = {
-    1: '第一关·紧急出发：小明刚冲出家门赶往考场。请根据玩家建议，合理续写小明的行动。难度★★',
-    2: '第二关·城市穿行：小明正在去考场的路上，遇到现实障碍，需要做出选择。难度★★★',
-    3: '第三关·最大危机：时间越来越紧，遭遇重大障碍。难度★★★★',
-    4: '第四关·最后冲刺：考场就在眼前，突发意外扎堆！\n规则：简单路线暗藏陷阱，困难路线反而是最稳妥选择。\n结尾标注【结局判定】成功 或 【结局判定】失败。难度★★★★★'
-  };
-  return themes[round] || '';
-}
-
-function buildConsistencyConstraint(storyText, selectedInput) {
-  let constraint = '⚠️【剧情一致性硬约束 — 必须遵守】⚠️\n以下剧情已经发生，你生成的内容绝不能与以下任何事实矛盾：\n';
-  if (selectedInput) {
-    constraint += `\n【当前关卡玩家已执行的行动 — 不可推翻】\n小明已经执行了：${selectedInput}\n所有续写和三个分支都必须从这个已确定的状态出发\n`;
-  }
-  const paths = [...storyText.matchAll(/【选择路径】([^\n]+)/g)].map(m => m[1].trim());
-  if (paths.length === 0 && !selectedInput) {
-    constraint += '- 小明是一个高三学生，睡过头了，正在赶去高考考场\n距离高考开始时间紧迫，他必须尽快赶到\n';
+function buildConsistency(st, si) {
+  let c = '⚠️【剧情一致性硬约束 — 必须遵守】⚠️\n以下剧情已经发生，绝不能矛盾：\n';
+  if (si) c += '\n【当前关卡已执行的行动 — 不可推翻】\n小明已执行：' + si + '\n';
+  const paths = [...st.matchAll(/【选择路径】([^\n]+)/g)].map(m => m[1].trim());
+  if (paths.length === 0 && !si) {
+    c += '- 高三学生小明，睡过头，赶去高考考场，时间紧迫\n';
   } else if (paths.length > 0) {
-    constraint += '\n以下是小明在之前关卡中已经做出的确定选择，不可更改：\n';
-    paths.forEach((p, i) => { constraint += `- 第${i+1}关结束时的确定选择：${p}\n`; });
+    c += '\n以下是小明之前关卡中已做出的选择，不可更改：\n';
+    paths.forEach((p, i) => { c += '- 第' + (i+1) + '关选择：' + p + '\n'; });
   }
-  constraint += '\n- 你必须基于上述已确定的选择来续写，不能引入与它们矛盾的设定\n';
-  constraint += '- 【禁止】如果小明已在车上，分支不能出现"骑单车""跑步""打车"等\n';
-  constraint += '- 分支应该围绕当前已确定状态下的不同后续发展来展开\n';
-  return constraint;
+  c += '\n- 续写和分支必须基于已确定的状态\n';
+  c += '- 【禁止】分支中出现与已确定行动矛盾的交通工具\n';
+  return c;
+}
+
+function getTheme(r) {
+  const m = {
+    1: '第一关·紧急出发：小明冲出家门赶往考场。难度★★',
+    2: '第二关·城市穿行：路上遇到现实障碍。难度★★★',
+    3: '第三关·最大危机：时间紧迫，遭遇重大障碍。难度★★★★',
+    4: '第四关·最后冲刺：考场就在眼前，突发意外！\n规则：简单路线暗藏陷阱，困难路线反而最稳妥。结尾标注【结局判定】。难度★★★★★'
+  };
+  return m[r] || '';
 }
 
 // ─── 分支渲染 ───
 function renderBranches() {
-  document.getElementById('branch-loading').style.display = isAILoading ? '' : 'none';
-  const branchOptions = document.getElementById('branch-options');
-  if (isAILoading || branches.length < 3) { branchOptions.innerHTML = ''; return; }
-
-  branchOptions.innerHTML = branches.map(b => `
-    <div class="branch-option" onclick="selectBranch(${b.id})">
-      <div class="branch-icon">${b.icon}</div>
-      <div class="branch-title">${escapeHtml(b.title)}</div>
-      <div class="branch-desc">${escapeHtml(b.description)}</div>
-      <span class="branch-difficulty ${getDifficultyClass(b.difficulty)}">${escapeHtml(b.difficulty)}</span>
-    </div>
-  `).join('');
+  document.getElementById('branch-loading').style.display = aiBusy ? '' : 'none';
+  const el = document.getElementById('branch-options');
+  if (aiBusy || branches.length < 3) { el.innerHTML = ''; return; }
+  el.innerHTML = branches.map(b =>
+    '<div class="branch-option" onclick="pickBranch(' + b.id + ')">' +
+    '<div class="branch-icon">' + b.icon + '</div>' +
+    '<div class="branch-title">' + esc(b.title) + '</div>' +
+    '<div class="branch-desc">' + esc(b.description) + '</div>' +
+    '<span class="branch-difficulty ' + diffClass(b.difficulty) + '">' + esc(b.difficulty) + '</span>' +
+    '</div>'
+  ).join('');
 }
 
-function getDifficultyClass(d) {
-  if (d.includes('简') || d.includes('easy') || d.includes('Easy')) return 'easy';
-  if (d.includes('中') || d.includes('medium') || d.includes('Medium')) return 'medium';
+function diffClass(d) {
+  if (/简|easy/i.test(d)) return 'easy';
+  if (/中|medium/i.test(d)) return 'medium';
   return 'hard';
 }
 
 // ─── 选择分支 ───
-function selectBranch(branchId) {
-  selectedBranch = branchId;
-  const branch = branches.find(b => b.id === branchId);
-  if (branch) {
-    storyText += `\n\n【选择路径】小明选择了${branch.title}。${branch.description}`;
-  }
-
-  if (currentRound >= totalRounds) {
-    stopAudienceSimulation();
-    const isSuccess = finalOutcome === 'success';
-    document.getElementById('outcome-emoji').textContent = isSuccess ? '🎉' : '😢';
-    document.getElementById('outcome-title').textContent = isSuccess ? '成功抵达考场！' : '遗憾错过考试...';
-    document.getElementById('outcome-msg').textContent = isSuccess
-      ? '在全场观众的帮助下，小明终于冲进了考场！\n\n他气喘吁吁地坐到座位上，翻开试卷的那一刻，嘴角露出了微笑。\n\n这一路虽然惊险，但因为有你们的支持，他没有放弃！\n\n接下来，来测测你的高考人格类型吧～'
-      : '尽管小明拼尽全力，最终还是没能及时赶到考场。\n\n但这段经历让他学会了珍惜时间、学会在困境中做出选择。\n\n别灰心！人生的路很长，这只是一个小插曲。\n\n来测测你的高考人格类型吧～';
+function pickBranch(id) {
+  const b = branches.find(x => x.id === id);
+  if (!b) return;
+  story += '\n\n【选择路径】小明选择了' + b.title + '。' + b.description;
+  if (rnd >= 4) {
+    if (role === 'host') stopSim();
+    const win = outcome === 'success';
+    document.getElementById('outcome-emoji').textContent = win ? '🎉' : '😢';
+    document.getElementById('outcome-title').textContent = win ? '成功抵达考场！' : '遗憾错过考试...';
+    document.getElementById('outcome-msg').textContent = win
+      ? '在全场观众的帮助下，小明终于冲进了考场！\n\n他气喘吁吁坐到座位上，翻开试卷的那一刻，嘴角露出了微笑。\n\n这一路虽然惊险，但有你们的支持，他没有放弃！\n\n接下来，测测你的高考人格类型吧～'
+      : '尽管拼尽全力，最终还是没能及时赶到。\n\n但这段经历让他学会了珍惜时间、在困境中做选择。\n\n别灰心！人生的路很长，这只是一个小插曲。\n\n来测测你的高考人格类型吧～';
     document.getElementById('outcome-modal').classList.add('show');
   } else {
-    currentRound++;
-    submissions = getMockSubmissions(currentRound);
-    likedSubmissionId = '';
-    branches = [];
-    selectedSuggestion = '';
-    selectedBranch = -1;
-    finalOutcome = '';
-    storyExpanded = false;
-    gamePhase = 'input';
-    updateGameUI();
+    rnd++;
+    subs = getMockSubs(rnd);
+    if (role === 'audience') {
+      subs.unshift({
+        id: 'aud_sub_' + Date.now(), content: '加油小明！离考场越来越近了！',
+        likes: 3, timestamp: Date.now(), userName: audienceNick || '神秘观众'
+      });
+    }
+    myLikeId = ''; branches = []; outcome = ''; storyOpen = false;
+    phase = 'input';
+    updateUI();
   }
 }
 
-function closeOutcomeAndStartQuiz() {
+function closeOutcome() {
   document.getElementById('outcome-modal').classList.remove('show');
   startQuiz();
 }
 
-// ─── 观众模拟 ───
-function startAudienceSimulation() {
-  stopAudienceSimulation();
-  const names = ['高三·阿杰', '高三·小美', '高三·大壮', '高三·学霸', '高三·卷王',
-    '高三·学渣逆袭中', '高三·佛系少女', '高三·冲鸭', '送考爸爸', '隔壁班老王',
-    '监考老师本师', '吃瓜群众', '路过的小学生', '隔壁老王太太', '追梦少年'];
-  const pool = [
-    '骑共享单车啊，手机扫码一秒搞定！', '打车吧，现在叫车很快的',
-    '让他爸开车送，双闪一路飙过去', '走小路穿小区，比大路快多了',
-    '求助路边交警叔叔，说明情况', '打电话给考场老师，看能不能通融',
-    '地铁！地铁不堵车而且准时', '跑！什么都别想，就是跑！',
-    '让同学在考场门口接应他', '翻墙抄近道，中学后面有捷径',
-    '借路边外卖小哥的电动车', '拦一辆出租车，给双倍车费',
-    '先把准考证找出来，别慌！', '发朋友圈求助，万能的朋友圈',
-    '用导航选躲避拥堵路线'
+// ─── 模拟观众 ───
+function startSim() {
+  stopSim();
+  var names = ['高三·阿杰','高三·小美','高三·大壮','学霸同桌','卷王','佛系少女',
+    '送考爸爸','隔壁班老王','吃瓜群众','追梦少年','热心市民','语文课代表'];
+  var pool = [
+    '骑共享单车啊，手机扫码一秒搞定！','打车吧，现在叫车很快的',
+    '让他爸开车送，双闪一路飙过去','走小路穿小区，比大路快多了',
+    '求助路边交警叔叔，说明情况','打电话给考场老师，看能不能通融',
+    '地铁！地铁不堵车而且准时','跑！什么都别想，就是跑！',
+    '让同学在考场门口接应他','翻墙抄近道，中学后面有捷径',
+    '借路边外卖小哥的电动车','拦一辆出租车，给双倍车费',
+    '先把准考证找出来，别慌！','发朋友圈求助，万能的朋友圈',
+    '用导航选躲避拥堵路线','稳住心态，深呼吸，保持冷静'
   ];
-
-  const scheduleNext = () => {
-    if (gamePhase !== 'input') { audienceTimerId = setTimeout(scheduleNext, 4000); return; }
-    const rand = Math.random();
-    if (rand < 0.35) {
-      const name = names[Math.floor(Math.random() * names.length)];
-      let content = pool[Math.floor(Math.random() * pool.length)];
-      if (Math.random() < 0.3) content += ' 💪';
-      submissions = [{
-        id: 'aud_' + Date.now(), content, likes: Math.floor(Math.random() * 3) + 1,
-        timestamp: Date.now(), userName: name
-      }, ...submissions];
-      renderSubmissions();
-    } else if (rand < 0.8 && submissions.length > 0) {
-      const idx = Math.floor(Math.random() * submissions.length);
-      submissions[idx].likes++;
-      renderSubmissions();
+  var tick = function() {
+    if (phase !== 'input') { simTimer = setTimeout(tick, 4000); return; }
+    var r = Math.random();
+    if (r < 0.30) {
+      var name = names[Math.floor(Math.random() * names.length)];
+      var txt = pool[Math.floor(Math.random() * pool.length)];
+      if (Math.random() < 0.3) txt += ' 💪';
+      subs = [{ id: 'sim_' + Date.now(), content: txt, likes: Math.floor(Math.random() * 3) + 1, timestamp: Date.now(), userName: name }, ...subs];
+      renderSubs();
+    } else if (r < 0.7 && subs.length > 0) {
+      var idx = Math.floor(Math.random() * subs.length);
+      subs[idx].likes++;
+      renderSubs();
     }
-    audienceTimerId = setTimeout(scheduleNext, 2000 + Math.random() * 4000);
+    simTimer = setTimeout(tick, 1800 + Math.random() * 3500);
   };
-  audienceTimerId = setTimeout(scheduleNext, 1500);
+  simTimer = setTimeout(tick, 1200);
 }
 
-function stopAudienceSimulation() {
-  if (audienceTimerId) { clearTimeout(audienceTimerId); audienceTimerId = null; }
+function stopSim() { if (simTimer) { clearTimeout(simTimer); simTimer = null; } }
+
+// ─── 投稿墙 ───
+function renderSubs() {
+  var el = document.getElementById('submissions-list');
+  el.innerHTML = subs.map(function(s) {
+    return '<div class="submission-item">' +
+    '<div class="submission-header">' +
+    '<span class="submission-name">' + esc(s.userName) + '</span>' +
+    '<span class="submission-time">' + fmtTime(s.timestamp) + '</span>' +
+    '</div>' +
+    '<div class="submission-content">' + esc(s.content) + '</div>' +
+    '<div class="submission-footer">' +
+    '<button class="like-btn ' + (myLikeId === s.id ? 'liked' : '') + '" onclick="doLike(\'' + s.id + '\')">' +
+    (myLikeId === s.id ? '❤️' : '🤍') + ' ' + s.likes +
+    '</button>' +
+    '</div></div>';
+  }).join('');
 }
 
-// ─── 投稿渲染 ───
-function renderSubmissions() {
-  const el = document.getElementById('submissions-list');
-  el.innerHTML = submissions.map(s => `
-    <div class="submission-item">
-      <div class="submission-header">
-        <span class="submission-name">${escapeHtml(s.userName)}</span>
-        <span class="submission-time">${formatTime(s.timestamp)}</span>
-      </div>
-      <div class="submission-content">${escapeHtml(s.content)}</div>
-      <div class="submission-footer">
-        <button class="like-btn ${likedSubmissionId === s.id ? 'liked' : ''}" onclick="toggleLike('${s.id}')">
-          ${likedSubmissionId === s.id ? '❤️' : '🤍'} ${s.likes}
-        </button>
-      </div>
-    </div>
-  `).join('');
-}
-
-function toggleLike(id) {
-  if (likedSubmissionId === id) {
-    const s = submissions.find(s => s.id === id);
-    if (s) s.likes = Math.max(0, s.likes - 1);
-    likedSubmissionId = '';
+function doLike(id) {
+  if (myLikeId === id) {
+    var s = subs.find(function(x) { return x.id === id; }); if (s) s.likes = Math.max(0, s.likes - 1);
+    myLikeId = '';
   } else {
-    if (likedSubmissionId) {
-      const old = submissions.find(s => s.id === likedSubmissionId);
-      if (old) old.likes = Math.max(0, old.likes - 1);
-    }
-    const s = submissions.find(s => s.id === id);
-    if (s) s.likes++;
-    likedSubmissionId = id;
+    if (myLikeId) { var o = subs.find(function(x) { return x.id === myLikeId; }); if (o) o.likes = Math.max(0, o.likes - 1); }
+    var s = subs.find(function(x) { return x.id === id; }); if (s) s.likes++;
+    myLikeId = id;
   }
-  renderSubmissions();
+  renderSubs();
 }
 
-function getHighestVoted() {
-  if (submissions.length === 0) return null;
-  return submissions.reduce((a, b) => a.likes > b.likes ? a : b);
-}
+function getTopSub() { return subs.length ? subs.reduce(function(a, b) { return a.likes > b.likes ? a : b; }) : null; }
+function getRandomSub() { return subs.length ? subs[Math.floor(Math.random() * subs.length)] : null; }
 
-function getRandomSubmission() {
-  if (submissions.length === 0) return null;
-  return submissions[Math.floor(Math.random() * submissions.length)];
-}
-
-// ─── Mock投稿 ───
-function getMockSubmissions(round) {
-  const base = Date.now();
-  const data = {
+// ─── Mock ───
+function getMockSubs(r) {
+  var b = Date.now();
+  var m = {
     1: [
       { id:'r1_1', content:'小明飞快穿好衣服，抓起书包就往外冲', likes:12, userName:'观众A' },
       { id:'r1_2', content:'他决定骑共享单车抄近路去考场', likes:8, userName:'观众B' },
-      { id:'r1_3', content:'小明打电话给爸爸，让他开车送自己去', likes:15, userName:'观众C' }
+      { id:'r1_3', content:'小明打电话给爸爸，让他开车送自己', likes:15, userName:'观众C' },
+      { id:'r1_4', content:'叫个网约车，直接输入考场地址', likes:5, userName:'路人D' }
     ],
     2: [
       { id:'r2_1', content:'小明决定穿过公园抄近路', likes:10, userName:'路人甲' },
@@ -504,7 +541,7 @@ function getMockSubmissions(round) {
     3: [
       { id:'r3_1', content:'手机快没电了，先问路人借充电宝', likes:11, userName:'热心市民' },
       { id:'r3_2', content:'求助路边交警，看能否帮忙开道', likes:16, userName:'交警叔叔' },
-      { id:'r3_3', content:'放弃了，准备跑过去，拼最后一把', likes:7, userName:'旁观者' }
+      { id:'r3_3', content:'准备跑过去，拼最后一把', likes:7, userName:'旁观者' }
     ],
     4: [
       { id:'r4_1', content:'小明看到考场大门了，但排队人很多', likes:13, userName:'送考家长' },
@@ -512,313 +549,148 @@ function getMockSubmissions(round) {
       { id:'r4_3', content:'大喊我是考生，让前面的人让一让', likes:17, userName:'监考老师' }
     ]
   };
-  return (data[round] || data[1]).map(d => ({ ...d, timestamp: base - (data[round].length - data[round].indexOf(d)) * 60000 }));
+  return (m[r] || m[1]).map(function(d) { d.timestamp = b - (m[r].length - m[r].indexOf(d)) * 60000; return d; });
 }
-
-// ─── 观众模式 ───
-function enterAudience() {
-  isAudienceMode = true;
-  showView('audience');
-  document.getElementById('nickname-card').style.display = '';
-  document.getElementById('audience-submit-area').style.display = 'none';
-  if (audienceSubmissions.length === 0) {
-    audienceSubmissions = [
-      {
-        id: 's1', nickname: '高三学长', content: '记得带2B铅笔和准考证！考前深呼吸三次，告诉自己"我已经准备得很充分了"！',
-        likes: 128, timestamp: Date.now() - 3600000, liked: false
-      },
-      {
-        id: 's2', nickname: '语文老师', content: '作文先列提纲再下笔，开头结尾要呼应，审题时间不少于5分钟',
-        likes: 96, timestamp: Date.now() - 7200000, liked: false
-      },
-      {
-        id: 's3', nickname: '学霸同桌', content: '遇到不会的题先跳过！把能拿的分先拿到手，最后再回头啃硬骨头',
-        likes: 85, timestamp: Date.now() - 10800000, liked: false
-      }
-    ];
-  }
-  renderAudienceSubmissions();
-}
-
-function confirmNickname() {
-  const val = document.getElementById('nickname-input').value.trim();
-  if (!val) { alert('请先给自己起个昵称吧~'); return; }
-  if (val.length > 12) { alert('昵称最多12个字哦~'); return; }
-  audienceNickname = val;
-  document.getElementById('nickname-card').style.display = 'none';
-  document.getElementById('audience-submit-area').style.display = '';
-  document.getElementById('nickname-display').textContent = val;
-  renderAudienceSubmissions();
-}
-
-function changeNickname() {
-  document.getElementById('nickname-card').style.display = '';
-  document.getElementById('audience-submit-area').style.display = 'none';
-  document.getElementById('nickname-input').value = '';
-}
-
-function submitAudienceTip() {
-  const text = document.getElementById('audience-input').value.trim();
-  if (!text) { alert('请输入你的赶考妙招~'); return; }
-  if (text.length > 200) { alert('妙招最多200个字，精简一下吧~'); return; }
-  audienceSubmissions = [{
-    id: 'sub_' + Date.now(), nickname: audienceNickname, content: text,
-    likes: 0, timestamp: Date.now(), liked: false
-  }, ...audienceSubmissions];
-  document.getElementById('audience-input').value = '';
-  document.getElementById('char-count').textContent = '0/200';
-  renderAudienceSubmissions();
-  alert('✅ 投稿成功！你的妙招已展示');
-}
-
-function renderAudienceSubmissions() {
-  document.getElementById('audience-count').textContent = audienceSubmissions.length + '条';
-  document.getElementById('audience-wall-count').textContent = '共 ' + audienceSubmissions.length + ' 条';
-  const el = document.getElementById('audience-submissions');
-  el.innerHTML = audienceSubmissions.map((s, i) => `
-    <div class="submission-item">
-      <div class="submission-header">
-        <span class="submission-name">${i < 3 ? ['🥇','🥈','🥉'][i] + ' ' : ''}${escapeHtml(s.nickname)}</span>
-        <span class="submission-time">${formatTime(s.timestamp)}</span>
-      </div>
-      <div class="submission-content">${escapeHtml(s.content)}</div>
-      <div class="submission-footer">
-        <button class="like-btn ${s.liked ? 'liked' : ''}" onclick="audienceToggleLike('${s.id}')">
-          ${s.liked ? '❤️' : '🤍'} ${s.likes}
-        </button>
-      </div>
-    </div>
-  `).join('');
-}
-
-function audienceToggleLike(id) {
-  const s = audienceSubmissions.find(s => s.id === id);
-  if (!s) return;
-  if (s.liked) { s.likes = Math.max(0, s.likes - 1); s.liked = false; }
-  else { s.likes++; s.liked = true; }
-  renderAudienceSubmissions();
-}
-
-// ─── 实时字数 ───
-document.addEventListener('input', function(e) {
-  if (e.target.id === 'audience-input') {
-    const len = e.target.value.length;
-    const el = document.getElementById('char-count');
-    el.textContent = len + '/200';
-    el.className = 'char-count' + (len > 180 ? ' warn' : '');
-  }
-});
 
 // ─── 答题 ───
 function startQuiz() {
-  quizQuestions = getQuizQuestions();
-  currentQuizIndex = 0;
-  answers = new Map();
+  qIndex = 0; qAnswers = new Map();
   showView('quiz');
-  renderQuizQuestion();
+  renderQ();
 }
 
-function getQuizQuestions() {
-  return [
-    {
-      id: 1,
-      question: '离高考还有一个月，你发现自己的复习计划严重落后，你会？',
-      options: [
-        { id: 'A', text: '制定更严格的计划，每天压缩休息时间赶进度', scores: { J:10, S:10, T:10 } },
-        { id: 'B', text: '调整心态，果断放弃次要内容，死磕重点', scores: { P:10, E:10, F:10 } },
-        { id: 'C', text: '找老师和学霸请教，重新制定高效策略', scores: { E:10, N:10, J:10 } },
-        { id: 'D', text: '不给自己太大压力，尽力而为顺其自然', scores: { I:10, S:10, P:10 } }
-      ]
-    },
-    {
-      id: 2,
-      question: '考场上，你发现旁边同学在偷看你的答题卡，你会？',
-      options: [
-        { id: 'A', text: '不动声色地把答题卡往自己的方向挪了挪', scores: { I:10, T:10, J:10 } },
-        { id: 'B', text: '果断举手，小声告知监考老师', scores: { E:10, S:10, J:10 } },
-        { id: 'C', text: '无所谓，反正我的答案也不一定对', scores: { E:10, N:10, F:10 } },
-        { id: 'D', text: '内心有点不舒服，但强忍下来专注自己', scores: { I:10, F:10, T:10 } }
-      ]
-    },
-    {
-      id: 3,
-      question: '考完数学后大家讨论答案，你发现最后一道大题做错了，你会？',
-      options: [
-        { id: 'A', text: '立刻翻书验证，越想越懊悔，久久不能释怀', scores: { T:10, J:10, S:10 } },
-        { id: 'B', text: '告诉自己无法改变的事就别想了，专心备战下一科', scores: { P:10, N:10, F:10 } },
-        { id: 'C', text: '找同学倾诉情绪，互相安慰打气', scores: { E:10, I:10, N:10 } },
-        { id: 'D', text: '一个人安静地消化，这件事不会再对任何人提起', scores: { I:10, S:10, F:10 } }
-      ]
-    },
-    {
-      id: 4,
-      question: '如果高考成绩比你预估的低了30分，你的第一反应是？',
-      options: [
-        { id: 'A', text: '怀疑阅卷出问题，立刻申请复核分数', scores: { T:10, J:10, I:10 } },
-        { id: 'B', text: '冷静接受现实，马上研究这个分段能报什么学校', scores: { P:10, S:10, T:10 } },
-        { id: 'C', text: '情绪崩溃大哭一场，然后和父母商量下一步', scores: { F:10, E:10, J:10 } },
-        { id: 'D', text: '相信一切都是最好的安排，人生的路不止一条', scores: { N:10, I:10, P:10 } }
-      ]
-    },
-    {
-      id: 5,
-      question: '高考结束后，你最想对曾经的自己说一句什么？',
-      options: [
-        { id: 'A', text: '"你应该可以更拼一点的"', scores: { J:10, S:10, T:10 } },
-        { id: 'B', text: '"谢谢你没有放弃，坚持到了最后"', scores: { F:10, P:10, N:10 } },
-        { id: 'C', text: '"不论结果如何，我都为你感到骄傲"', scores: { E:10, F:10, N:10 } },
-        { id: 'D', text: '"这段奋斗的时光本身，就已经很珍贵了"', scores: { I:10, S:10, P:10 } }
-      ]
-    }
-  ];
-}
-
-function renderQuizQuestion() {
-  const q = quizQuestions[currentQuizIndex];
-  document.getElementById('quiz-num').textContent = currentQuizIndex + 1;
-  document.getElementById('quiz-progress-fill').style.width = ((currentQuizIndex + 1) / quizQuestions.length * 100) + '%';
+function renderQ() {
+  var qs = getQs();
+  var q = qs[qIndex];
+  document.getElementById('quiz-num').textContent = qIndex + 1;
+  document.getElementById('quiz-progress-fill').style.width = ((qIndex + 1) / qs.length * 100) + '%';
   document.getElementById('quiz-question').textContent = q.question;
-  document.getElementById('quiz-options').innerHTML = q.options.map(o => `
-    <div class="quiz-option" onclick="answerQuestion('${o.id}')">
-      ${escapeHtml(o.text)}
-    </div>
-  `).join('');
+  document.getElementById('quiz-options').innerHTML = q.options.map(function(o) {
+    return '<div class="quiz-option" onclick="answerQ(\'' + o.id + '\')">' + esc(o.text) + '</div>';
+  }).join('');
 }
 
-function answerQuestion(optionId) {
-  const q = quizQuestions[currentQuizIndex];
-  answers.set(q.id, optionId);
-  if (currentQuizIndex < quizQuestions.length - 1) {
-    currentQuizIndex++;
-    renderQuizQuestion();
-  } else {
-    showResult();
-  }
+function answerQ(oid) {
+  qAnswers.set(getQs()[qIndex].id, oid);
+  if (qIndex < getQs().length - 1) { qIndex++; renderQ(); }
+  else showResult();
+}
+
+function getQs() {
+  return [
+    { id:1, question:'离高考还有一个月，你的复习计划严重落后，你会？', options:[
+      { id:'A', text:'制定更严格的计划，压缩休息时间赶进度', scores:{J:10,S:10,T:10} },
+      { id:'B', text:'调整心态，果断放弃次要内容，死磕重点', scores:{P:10,E:10,F:10} },
+      { id:'C', text:'找老师和学霸请教，重新制定高效策略', scores:{E:10,N:10,J:10} },
+      { id:'D', text:'不给自己太大压力，尽力而为顺其自然', scores:{I:10,S:10,P:10} }
+    ]},
+    { id:2, question:'考场上，旁边同学偷看你的答题卡，你会？', options:[
+      { id:'A', text:'不动声色地把答题卡往自己方向挪了挪', scores:{I:10,T:10,J:10} },
+      { id:'B', text:'果断举手，小声告知监考老师', scores:{E:10,S:10,J:10} },
+      { id:'C', text:'无所谓，反正我的答案也不一定对', scores:{E:10,N:10,F:10} },
+      { id:'D', text:'内心有点不舒服，但强忍下来专注自己', scores:{I:10,F:10,T:10} }
+    ]},
+    { id:3, question:'考完数学后大家讨论答案，你发现最后一道大题做错了，你会？', options:[
+      { id:'A', text:'立刻翻书验证，越想越懊悔，久久不能释怀', scores:{T:10,J:10,S:10} },
+      { id:'B', text:'告诉自己无法改变的事就别想了，专心备战下一科', scores:{P:10,N:10,F:10} },
+      { id:'C', text:'找同学倾诉情绪，互相安慰打气', scores:{E:10,F:10,N:10} },
+      { id:'D', text:'一个人安静地消化，不再对任何人提起', scores:{I:10,S:10,F:10} }
+    ]},
+    { id:4, question:'如果高考成绩比预估低了30分，你的第一反应是？', options:[
+      { id:'A', text:'怀疑阅卷出问题，立刻申请复核分数', scores:{T:10,J:10,I:10} },
+      { id:'B', text:'冷静接受现实，马上研究这个分段能报什么学校', scores:{P:10,S:10,T:10} },
+      { id:'C', text:'情绪崩溃大哭一场，然后和父母商量下一步', scores:{F:10,E:10,J:10} },
+      { id:'D', text:'相信一切都是最好的安排，人生路不止一条', scores:{N:10,I:10,P:10} }
+    ]},
+    { id:5, question:'高考结束后，你最想对曾经的自己说什么？', options:[
+      { id:'A', text:'"你应该可以更拼一点的"', scores:{J:10,S:10,T:10} },
+      { id:'B', text:'"谢谢你没有放弃，坚持到了最后"', scores:{F:10,P:10,N:10} },
+      { id:'C', text:'"不论结果如何，我都为你感到骄傲"', scores:{E:10,F:10,N:10} },
+      { id:'D', text:'"这段奋斗的时光本身，就已经很珍贵了"', scores:{I:10,S:10,P:10} }
+    ]}
+  ];
 }
 
 // ─── 结果 ───
 function showResult() {
-  const scores = { E:50, I:50, S:50, N:50, T:50, F:50, J:50, P:50 };
-  answers.forEach((oid, qid) => {
-    const q = quizQuestions.find(q => q.id === qid);
-    const o = q?.options.find(o => o.id === oid);
-    if (o) { for (const [k, v] of Object.entries(o.scores)) { if (scores[k] !== undefined) scores[k] += v; } }
+  var sc = { E:50, I:50, S:50, N:50, T:50, F:50, J:50, P:50 };
+  qAnswers.forEach(function(oid, qid) {
+    var q = getQs().find(function(x) { return x.id === qid; });
+    var o = q && q.options.find(function(x) { return x.id === oid; });
+    if (o) Object.keys(o.scores).forEach(function(k) { sc[k] += o.scores[k]; });
   });
+  var type = (sc.E >= sc.I ? 'E' : 'I') + (sc.N >= sc.S ? 'N' : 'S') + (sc.T >= sc.F ? 'T' : 'F') + (sc.J >= sc.P ? 'J' : 'P');
+  var info = typeMap()[type] || { name:'独一无二的你', desc:'你拥有与众不同的性格组合。高考只是人生旅途中的一站，你拥有无限的潜能。', blessing:'🌈 愿高考成为你精彩人生的新起点！', advice:'相信自己的独特之处，大胆探索属于你的人生道路' };
 
-  const typeStr =
-    (scores.E >= scores.I ? 'E' : 'I') +
-    (scores.N >= scores.S ? 'N' : 'S') +
-    (scores.T >= scores.F ? 'T' : 'F') +
-    (scores.J >= scores.P ? 'J' : 'P');
-
-  const typeMap = getTypeMap();
-  const info = typeMap[typeStr] || {
-    name: '独一无二的你',
-    description: '你拥有与众不同的性格组合，没有人能定义你。高考只是人生旅途中的一站，而你拥有无限的潜能去创造属于自己的精彩未来！',
-    blessing: '🌈 愿高考成为你精彩人生的新起点！你的独特无可替代，你的未来充满无限可能。相信自己，你已经足够优秀，放手去追逐属于你的梦想吧！加油！',
-    advice: '相信自己的独特之处，大胆探索属于你的人生道路'
-  };
-
-  document.getElementById('result-emoji').textContent = getTypeEmoji(typeStr);
-  document.getElementById('result-type').textContent = typeStr;
+  document.getElementById('result-emoji').textContent = emojiFor(type);
+  document.getElementById('result-type').textContent = type;
   document.getElementById('result-name').textContent = info.name;
-  document.getElementById('result-desc').textContent = info.description;
+  document.getElementById('result-desc').textContent = info.desc;
   document.getElementById('result-blessing').textContent = info.blessing;
   document.getElementById('result-advice').textContent = info.advice;
-  renderDimensions(scores);
+  renderDims(sc);
   showView('result');
 }
 
-function renderDimensions(scores) {
-  const dims = [
-    { name: '能量来源', left: '内向(I)', right: '外向(E)', score: Math.round(scores.E / (scores.E + scores.I) * 100) },
-    { name: '认知方式', left: '感觉(S)', right: '直觉(N)', score: Math.round(scores.N / (scores.N + scores.S) * 100) },
-    { name: '决策方式', left: '思考(T)', right: '情感(F)', score: Math.round(scores.F / (scores.F + scores.T) * 100) },
-    { name: '生活方式', left: '判断(J)', right: '感知(P)', score: Math.round(scores.P / (scores.P + scores.J) * 100) }
+function renderDims(sc) {
+  var dims = [
+    { name:'能量来源', left:'内向(I)', right:'外向(E)', pct:Math.round(sc.E/(sc.E+sc.I)*100) },
+    { name:'认知方式', left:'感觉(S)', right:'直觉(N)', pct:Math.round(sc.N/(sc.N+sc.S)*100) },
+    { name:'决策方式', left:'思考(T)', right:'情感(F)', pct:Math.round(sc.F/(sc.F+sc.T)*100) },
+    { name:'生活方式', left:'判断(J)', right:'感知(P)', pct:Math.round(sc.P/(sc.P+sc.J)*100) }
   ];
-  document.getElementById('dimensions').innerHTML = dims.map(d => `
-    <div class="dimension-item">
-      <div class="dimension-name">${d.name}</div>
-      <div class="dimension-bar"><div class="dimension-fill" style="width:${d.score}%"></div></div>
-      <div class="dimension-labels"><span>${d.left}</span><span>${d.right}</span></div>
-    </div>
-  `).join('');
+  document.getElementById('dimensions').innerHTML = dims.map(function(d) {
+    return '<div class="dimension-item">' +
+    '<div class="dimension-name">' + d.name + '</div>' +
+    '<div class="dimension-bar"><div class="dimension-fill" style="width:' + d.pct + '%"></div></div>' +
+    '<div class="dimension-labels"><span>' + d.left + '</span><span>' + d.right + '</span></div>' +
+    '</div>';
+  }).join('');
 }
 
-function getTypeEmoji(type) {
-  const map = {
-    ENFP:'🎨', ENFJ:'👑', ENTP:'💡', ENTJ:'🏆',
-    ESFP:'🎭', ESFJ:'🤝', ESTP:'⚡', ESTJ:'📋',
-    INFP:'🕊️', INFJ:'🔮', INTP:'🔬', INTJ:'🏗️',
-    ISFP:'🎵', ISFJ:'🛡️', ISTP:'🔧', ISTJ:'📊'
-  };
-  return map[type] || '🌈';
+function emojiFor(t) {
+  var m = { ENFP:'🎨',ENFJ:'👑',ENTP:'💡',ENTJ:'🏆',ESFP:'🎭',ESFJ:'🤝',ESTP:'⚡',ESTJ:'📋',
+    INFP:'🕊️',INFJ:'🔮',INTP:'🔬',INTJ:'🏗️',ISFP:'🎵',ISFJ:'🛡️',ISTP:'🔧',ISTJ:'📊' };
+  return m[t]||'🌈';
 }
 
-function getTypeMap() {
+function typeMap() {
   return {
-    ENFP: { name:'社团点子王', description:'你是班级里最有创意的那一个，脑子里永远有数不完的新点子。在备考中，你用天马行空的想象力把枯燥的知识变成有趣的记忆法。同桌说跟你一起复习永远不会无聊！', blessing:'🌟 愿你的创造力在考场上闪闪发光！你不需要像别人那样死记硬背，你有自己独特的学习方式。保持你的热情和好奇心，大学社团在向你招手！', advice:'发挥你的创意优势，同时记得制定一个具体的时间表，把灵感落地为行动' },
-    ENFJ: { name:'班级精神领袖', description:'你是班里的主心骨，总能在大家最焦虑的时候给出一句暖心的话。高三最后一个月，同学们都说"有你在就安心"。你的存在本身就是一种力量！', blessing:'👑 愿你的温暖和领导力照亮最后的冲刺！你不仅会考上理想的大学，还会成为大学里最受欢迎的学长/学姐。相信自己，你是大家的定心丸！', advice:'在照顾大家情绪的同时，也别忘了给自己留一些安静的独处时间' },
-    ENTP: { name:'解题鬼才', description:'面对压轴题，别人还在苦思冥想，你已经找到了三种不同的解法。你享受攻克难题的快感，不按常理出牌是你的标签。在高考战场上，你是那个能逆风翻盘的人！', blessing:'💡 愿你的聪明才智在考场上大杀四方！没有难题能困住你，你天生就是来找bug的。大学实验室、辩论队和创业大赛都在等着你！', advice:'发挥你的思维优势，但别忘了扎实基础，答题时多检查一遍哦' },
-    ENTJ: { name:'学霸指挥官', description:'你是班级里的"总设计师"，高三开学就画好了复习路线图，每一步都目标明确。你不是在学习，你是在执行一场精密的战役。同学们都偷偷参考你的计划表！', blessing:'🏆 愿你的战略布局在高考中大获全胜！你的执行力和规划能力让你注定成为想成为的人。大学学生会主席的位置非你莫属，高考只是你征服的第一个目标！', advice:'计划很棒，但也要给自己留一点弹性空间，偶尔放松反而效率更高' },
-    ESFP: { name:'班级活宝', description:'你是班里的开心果，课间十分钟也能把全班逗得哈哈大笑。面对高考压力，你用乐观化解焦虑，是大家的"情绪充电宝"。高三因为有你的笑声而没那么煎熬！', blessing:'🎭 愿你的阳光心态融化考场上的一切紧张！笑着答题的你运气不会太差。大学迎新晚会、十佳歌手大赛，舞台已经在等你啦！', advice:'保持乐观，但每一道题都要认真对待，别让粗心偷走你的分数' },
-    ESFJ: { name:'暖心课代表', description:'你是老师最信赖的帮手、同学最依赖的伙伴。每次发复习资料你都多印几份，生怕有人没拿到。你的善良和责任感让你成为班级里最温暖的存在。', blessing:'🤝 愿你的善良在高考中获得最美好的回报！你一直照顾着身边的人，现在请相信世界也会温柔待你。大学宿舍里，你会是最受欢迎的室友！', advice:'照顾别人也要照顾好自己，相信你已经准备得足够好了' },
-    ESTP: { name:'行动派少年', description:'你不是那种坐得住的人，比起刷题你更相信"实战出真知"。面对突发状况你从不慌张，考场上的任何意外都难不倒你。你是那个能在最后十分钟力挽狂澜的人！', blessing:'⚡ 愿你的果敢和应变力让你在高考中如鱼得水！你是天生的实战派，没有什么能阻挡你的脚步。大学体育场、户外社团，广阔天地任你闯！', advice:'发挥你的行动力优势，答题时沉住气多检查一遍，稳中求胜' },
-    ESTJ: { name:'自律大学霸', description:'你是教室最早到、最晚走的那个人。你的错题本比别人的课本还厚，每一道题旁边都工工整整写着解题思路。你的自律让所有人佩服，你走的每一步都踏实有力。', blessing:'📋 愿你的每一份努力都在高考中完美兑现！自律的人值得最好的结果。你一定会考上心仪的大学，然后继续保持你那让人佩服的作息表！', advice:'你的自律能力超强，但也要偶尔放松一下，去操场跑一圈也很好' },
-    INFP: { name:'文艺梦想家', description:'你的笔记本扉页上写着喜欢的诗，桌面贴着梦想大学的照片。你有丰富的内心世界，高考对你来说不只是考试，而是通往梦想的桥。你细腻而坚韧，安静却有力量。', blessing:'🕊️ 愿你心中的诗和远方照亮高考的每一分钟！你的梦想值得被认真对待。大学文学社、校刊编辑部，那些美好的地方正在等你。勇敢去追！', advice:'保持你的梦想力，同时把大目标拆成每天的小任务，一步步靠近' },
-    INFJ: { name:'深度思考者', description:'你不满足于"是什么"，总要追问"为什么"。在别人刷题的时候，你在理解知识背后的逻辑。你看问题比同龄人深得多，你的思想里藏着超越年龄的成熟。', blessing:'🔮 愿你的深度思考在高考中带你看透每一道题的本质！你天生就懂得学习的意义，高考只是你展现深度的第一站。大学哲学社、心理协会，你会找到同频的人！', advice:'深度思考很宝贵，但也别忘了照顾好自己的身体和睡眠' },
-    INTP: { name:'理科学霸', description:'你是数理化的王者，解题对你来说就像玩游戏。你享受推导公式的快感，草稿纸上写满了别人看不懂的演算。在理科的世界里，你就是那个无所不能的人！', blessing:'🔬 愿你的逻辑思维在高考中大放异彩！每一道难题都在等待你来破解。大学实验室、ACM竞赛队、科研项目，那才是你的主场！', advice:'发挥你的理科优势，但语文英语也要稳住，注意书写规范哦' },
-    INTJ: { name:'未来规划师', description:'你早就在心里画好了未来十年的蓝图——什么大学、什么专业、什么工作。高三对你来说只是计划中的一环，每一步都经过深思熟虑。你是自己人生的总导演！', blessing:'🏗️ 愿你精心规划的蓝图在高考中完美展开！你是天生的战略家，这场考试只是你宏大计划中的一步。相信自己，你的未来比你想象的还要精彩！', advice:'计划很完美，但也接受过程中的小偏差，路不只一条' },
-    ISFP: { name:'艺术特长生', description:'你有独特的审美和节奏，不随波逐流。别人刷五三，你可能有自己的复习方法。你相信感觉，直觉往往比分析更准确。高三的你，是用心在感受这段特别的时光。', blessing:'🎨 愿你的独特天赋在高考中画出最美的答卷！你不需要和别人一样，你的节奏就是最好的节奏。大学设计系、音乐社，你的舞台很大！', advice:'保持你的独特风格，但也跟上整体复习进度，别落下重要知识点' },
-    ISFJ: { name:'默默耕耘者', description:'你从不张扬，但你的努力所有人都看在眼里。每天第一个到教室开灯的是你，默默把黑板擦干净的是你。你的勤奋和专注是最珍贵的品质，量变终将引起质变！', blessing:'🛡️ 愿你的坚持和付出在高考中获得最丰厚的回报！你走过的每一步都算数，你的认真是最强大的武器。大学图书馆靠窗的位置，已经为你留好了！', advice:'你的踏实很珍贵，偶尔也要抬头看看方向，和同学交流一下心得' },
-    ISTP: { name:'动手达人', description:'你不是纸上谈兵的类型，比起听课你更喜欢动手实验。你冷静理性，考场上的紧张气氛影响不了你。你总是能用最直接有效的方式解决问题，实用主义是你的王牌！', blessing:'🔧 愿你的冷静和实用智慧在高考中扫清一切障碍！你总是能找到最优解。大学工科实验室、机器人社团，那才是你大展身手的地方！', advice:'你很务实，但也要给理想留一些空间，保持对大学生活的憧憬' },
-    ISTJ: { name:'稳扎稳打型', description:'你是考场上最稳的那一个，从不慌乱。你的笔记工整得像印刷品，每一道错题都认真订正。你不靠运气，你的每一分都来自日复一日的踏实努力。稳，就是你的超能力！', blessing:'📊 愿你的稳重和扎实为高考奠定最坚实的基础！你从来不靠运气靠实力。大学里，你会继续用这种让人安心的风格，成为导师最信赖的学生！', advice:'你的稳定性超强，偶尔也可以尝试一下新的学习方法换换口味' }
+    ENFP:{ name:'社团点子王', desc:'你是班级里最有创意的那一个，脑子里永远有数不完的新点子。在备考中，你用天马行空的想象力把枯燥的知识变成有趣的记忆法。同桌说跟你一起复习永远不会无聊！', blessing:'🌟 愿你的创造力在考场上闪闪发光！你不需要像别人那样死记硬背，你有自己独特的学习方式。保持你的热情和好奇心，大学社团在向你招手！', advice:'发挥你的创意优势，同时记得制定一个具体的时间表，把灵感落地为行动' },
+    ENFJ:{ name:'班级精神领袖', desc:'你是班里的主心骨，总能在大家最焦虑的时候给出一句暖心的话。高三最后一个月，同学们都说"有你在就安心"。', blessing:'👑 愿你的温暖和领导力照亮最后的冲刺！你不仅会考上理想的大学，还会成为大学里最受欢迎的学长/学姐。', advice:'在照顾大家情绪的同时，也别忘了给自己留一些安静的独处时间' },
+    ENTP:{ name:'解题鬼才', desc:'面对压轴题，别人还在苦思冥想，你已经找到了三种不同的解法。你享受攻克难题的快感，不按常理出牌是你的标签。', blessing:'💡 愿你的聪明才智在考场上大杀四方！没有难题能困住你，你天生就是来找bug的。', advice:'发挥你的思维优势，但别忘了扎实基础，答题时多检查一遍' },
+    ENTJ:{ name:'学霸指挥官', desc:'你是班级里的"总设计师"，高三开学就画好了复习路线图，每一步都目标明确。你不是在学习，你是在执行一场精密的战役。', blessing:'🏆 愿你的战略布局在高考中大获全胜！你的执行力和规划能力让你注定成为想成为的人。', advice:'计划很棒，但也要给自己留一点弹性空间，偶尔放松反而效率更高' },
+    ESFP:{ name:'班级活宝', desc:'你是班里的开心果，课间十分钟也能把全班逗得哈哈大笑。面对高考压力，你用乐观化解焦虑，是大家的"情绪充电宝"。', blessing:'🎭 愿你的阳光心态融化考场上的一切紧张！笑着答题的你运气不会太差。', advice:'保持乐观，但每一道题都要认真对待，别让粗心偷走你的分数' },
+    ESFJ:{ name:'暖心课代表', desc:'你是老师最信赖的帮手、同学最依赖的伙伴。每次发复习资料你都多印几份，生怕有人没拿到。你的善良和责任感让你成为班级里最温暖的存在。', blessing:'🤝 愿你的善良在高考中获得最美好的回报！你一直照顾着身边的人，现在请相信世界也会温柔待你。', advice:'照顾别人也要照顾好自己，相信你已经准备得足够好了' },
+    ESTP:{ name:'行动派少年', desc:'你不是那种坐得住的人，比起刷题你更相信"实战出真知"。面对突发状况你从不慌张，考场上的任何意外都难不倒你。', blessing:'⚡ 愿你的果敢和应变力让你在高考中如鱼得水！你是天生的实战派。', advice:'发挥你的行动力优势，答题时沉住气多检查一遍，稳中求胜' },
+    ESTJ:{ name:'自律大学霸', desc:'你是教室最早到、最晚走的那个人。你的错题本比别人的课本还厚，每一道题旁边都工工整整写着解题思路。', blessing:'📋 愿你的每一份努力都在高考中完美兑现！自律的人值得最好的结果。', advice:'你的自律能力超强，但也要偶尔放松一下，去操场跑一圈也很好' },
+    INFP:{ name:'文艺梦想家', desc:'你的笔记本扉页上写着喜欢的诗，桌面贴着梦想大学的照片。你有丰富的内心世界，高考对你来说不只是考试，而是通往梦想的桥。', blessing:'🕊️ 愿你心中的诗和远方照亮高考的每一分钟！你的梦想值得被认真对待。', advice:'保持你的梦想力，同时把大目标拆成每天的小任务，一步步靠近' },
+    INFJ:{ name:'深度思考者', desc:'你不满足于"是什么"，总要追问"为什么"。在别人刷题的时候，你在理解知识背后的逻辑。', blessing:'🔮 愿你的深度思考在高考中带你看透每一道题的本质！', advice:'深度思考很宝贵，但也别忘了照顾好自己的身体和睡眠' },
+    INTP:{ name:'理科学霸', desc:'你是数理化的王者，解题对你来说就像玩游戏。你享受推导公式的快感，草稿纸上写满了别人看不懂的演算。', blessing:'🔬 愿你的逻辑思维在高考中大放异彩！每一道难题都在等待你来破解。', advice:'发挥你的理科优势，但语文英语也要稳住，注意书写规范' },
+    INTJ:{ name:'未来规划师', desc:'你早就在心里画好了未来十年的蓝图——什么大学、什么专业、什么工作。高三对你来说只是计划中的一环。', blessing:'🏗️ 愿你精心规划的蓝图在高考中完美展开！你是天生的战略家。', advice:'计划很完美，但也接受过程中的小偏差，路不只一条' },
+    ISFP:{ name:'艺术特长生', desc:'你有独特的审美和节奏，不随波逐流。别人刷五三，你可能有自己的复习方法。你相信感觉，直觉往往比分析更准确。', blessing:'🎨 愿你的独特天赋在高考中画出最美的答卷！你不需要和别人一样。', advice:'保持你的独特风格，但也跟上整体复习进度，别落下重要知识点' },
+    ISFJ:{ name:'默默耕耘者', desc:'你从不张扬，但你的努力所有人都看在眼里。每天第一个到教室开灯的是你，默默把黑板擦干净的是你。', blessing:'🛡️ 愿你的坚持和付出在高考中获得最丰厚的回报！你走过的每一步都算数。', advice:'你的踏实很珍贵，偶尔也要抬头看看方向，和同学交流一下心得' },
+    ISTP:{ name:'动手达人', desc:'你不是纸上谈兵的类型，比起听课你更喜欢动手实验。你冷静理性，考场上的紧张气氛影响不了你。', blessing:'🔧 愿你的冷静和实用智慧在高考中扫清一切障碍！你总是能找到最优解。', advice:'你很务实，但也要给理想留一些空间，保持对大学生活的憧憬' },
+    ISTJ:{ name:'稳扎稳打型', desc:'你是考场上最稳的那一个，从不慌乱。你的笔记工整得像印刷品，每一道错题都认真订正。你不靠运气，靠日复一日的踏实努力。', blessing:'📊 愿你的稳重和扎实为高考奠定最坚实的基础！你从来不靠运气靠实力。', advice:'你的稳定性超强，偶尔也可以尝试一下新的学习方法换换口味' }
   };
 }
 
 // ─── 重新开始 ───
 function restartGame() {
-  currentRound = 1;
-  gamePhase = 'input';
-  storyText = `高三学生小明睡过头了，闹钟响了三遍都没听到。
-当他终于醒来时，距离高考开始只剩30分钟！
-而考场在城市的另一端，正常情况下需要40分钟车程...`;
-  submissions = getMockSubmissions(1);
-  likedSubmissionId = '';
-  branches = [];
-  selectedBranch = -1;
-  selectedSuggestion = '';
-  aiStrategy = '';
-  finalOutcome = '';
-  storyExpanded = false;
-  isAILoading = false;
-  answers = new Map();
-  currentQuizIndex = 0;
-  stopAudienceSimulation();
-  startCountdown();
+  location.href = location.href.split('?')[0];
 }
 
-// ─── 辅助函数 ───
-function escapeHtml(str) {
-  const div = document.createElement('div');
-  div.textContent = str;
-  return div.innerHTML;
+// ─── 工具 ───
+function esc(s) {
+  var d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
 }
 
-function formatTime(ts) {
-  const diff = Date.now() - ts;
+function fmtTime(ts) {
+  var diff = Date.now() - ts;
   if (diff < 60000) return '刚刚';
   if (diff < 3600000) return Math.floor(diff / 60000) + '分钟前';
   if (diff < 86400000) return Math.floor(diff / 3600000) + '小时前';
   return Math.floor(diff / 86400000) + '天前';
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-// ─── 初始化 ───
-function initStory() {
-  // 页面加载后展示首页
-  showView('home');
 }
