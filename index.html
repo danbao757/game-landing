@@ -110,7 +110,7 @@
     <!-- 观众输入区（仅观众模式显示） -->
     <div class="card" id="audience-input-card" style="display:none">
       <h2 class="card-title">💬 发表你的建议</h2>
-      <textarea class="textarea" id="audience-tip-input" placeholder="写一句话，帮小明出谋划策！（最多200字）" maxlength="200"></textarea>
+      <textarea class="textarea" id="audience-tip-input" placeholder="写一句话，帮小明出谋划策！（最多200字）" maxlength="200" oninput="document.getElementById('char-count').textContent=this.value.length+'/200'"></textarea>
       <div class="input-footer">
         <span class="char-count" id="char-count">0/200</span>
         <button class="btn-primary" style="width:auto;padding:10px 24px;" onclick="submitAudienceTip()">📨 发布</button>
@@ -179,6 +179,9 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+<!-- Firebase SDK（跨设备实时同步） -->
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
 <script src="game.js"></script>
 </body>
 </html>

@@ -1,19 +1,38 @@
 /* ============================================================
- * 高考冲刺大作战 - 游戏核心逻辑 v3
- * 主持人/观众共用同一游戏视图，观众可看可投可赞不可发指令
+ * 高考冲刺大作战 - 游戏核心逻辑 v4
+ * 支持 Firebase 实时同步（主持人↔观众跨设备联动）
  * ============================================================ */
 
 // ─── 智谱AI ───
 const ZHIPU = 'https://open.bigmodel.cn/api/paas/v4/chat/completions';
 const ZHIPU_KEY = '7bf6eb414d39415baf72cd7ca57f56a1.StEPo8uIFfPtfTvf';
 
+// ─── Firebase 配置 ───
+// 1. 去 https://console.firebase.google.com/ 创建项目
+// 2. 启用 Realtime Database（选择测试模式/允许读写）
+// 3. 将下面的配置替换为你的项目配置
+const FIREBASE_CONFIG = {
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_PROJECT.firebaseapp.com",
+  databaseURL: "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
+  projectId: "YOUR_PROJECT_ID",
+  storageBucket: "YOUR_PROJECT.appspot.com",
+  messagingSenderId: "YOUR_SENDER_ID",
+  appId: "YOUR_APP_ID"
+};
+
+// ─── Firebase 实例 ───
+let firebaseReady = false;
+let db = null;
+let roomRef = null;
+
 // ─── 角色 ───
-let role = 'host'; // 'host' | 'audience'
+let role = 'host';
 let audienceNick = '';
 
-// ─── 游戏状态 ───
+// ─── 游戏状态（本地缓存） ───
 let rnd = 1;
-let phase = 'input';           // 'input' | 'branch'
+let phase = 'input';
 let story = `高三学生小明睡过头了，闹钟响了三遍都没听到。
 当他终于醒来时，距离高考开始只剩30分钟！
 而考场在城市的另一端，正常情况下需要40分钟车程...`;
@@ -24,17 +43,26 @@ let outcome = '';
 let storyOpen = false;
 let aiBusy = false;
 
+let roomCode = '';
 let simTimer = null;
 let cdTimer = null;
-
 let qIndex = 0;
 let qAnswers = new Map();
+let localWriteGuard = false; // 防止 Firebase 回写触发循环
 
 // ─── 页面初始化 ───
 document.addEventListener('DOMContentLoaded', () => {
+  initFirebase();
   const p = new URLSearchParams(location.search);
+  roomCode = p.get('room') || '';
+
   if (p.get('mode') === 'audience') {
     role = 'audience';
+    if (roomCode && firebaseReady) {
+      initRoomRef();
+      listenGameFromFB();
+      listenSubsFromFB();
+    }
     enterAudienceGame();
   } else {
     showView('home');
@@ -42,19 +70,118 @@ document.addEventListener('DOMContentLoaded', () => {
   initQR();
 });
 
+// ─── Firebase 初始化 ───
+function initFirebase() {
+  if (!FIREBASE_CONFIG.apiKey || FIREBASE_CONFIG.apiKey === 'YOUR_API_KEY') {
+    console.warn('⚠ Firebase 未配置，将使用本地模式（无跨设备同步）');
+    firebaseReady = false;
+    return;
+  }
+  try {
+    firebase.initializeApp(FIREBASE_CONFIG);
+    db = firebase.database();
+    firebaseReady = true;
+    console.log('✅ Firebase 已连接');
+  } catch (e) {
+    console.error('Firebase 初始化失败:', e);
+    firebaseReady = false;
+  }
+}
+
+function initRoomRef() {
+  if (!db || !roomCode) return;
+  roomRef = db.ref('games/' + roomCode);
+}
+
+// ─── 游戏状态同步 ───
+function syncGameToFB() {
+  if (!roomRef || role !== 'host') return;
+  localWriteGuard = true;
+  roomRef.child('gameState').set({
+    story: story, round: rnd, phase: phase,
+    branches: JSON.stringify(branches), storyOpen: storyOpen,
+    aiBusy: aiBusy, outcome: outcome
+  });
+  setTimeout(() => { localWriteGuard = false; }, 200);
+}
+
+function listenGameFromFB() {
+  if (!roomRef || role === 'host') return;
+  roomRef.child('gameState').on('value', snap => {
+    if (localWriteGuard) return;
+    const d = snap.val();
+    if (!d) return;
+    story = d.story || story;
+    rnd = d.round || rnd;
+    phase = d.phase || phase;
+    branches = d.branches ? JSON.parse(d.branches) : [];
+    storyOpen = !!d.storyOpen;
+    aiBusy = !!d.aiBusy;
+    outcome = d.outcome || '';
+    updateUI();
+  });
+}
+
+// ─── 投稿同步 ───
+function pushSubToFB(sub) {
+  if (!roomRef) return;
+  localWriteGuard = true;
+  roomRef.child('submissions').push(sub);
+  setTimeout(() => { localWriteGuard = false; }, 200);
+}
+
+function listenSubsFromFB() {
+  if (!roomRef) return;
+  // 初次加载全量
+  roomRef.child('submissions').once('value', snap => {
+    const data = snap.val();
+    subs = data ? Object.entries(data).map(([k, v]) => ({ id: k, ...v })) : [];
+    subs.sort((a, b) => b.timestamp - a.timestamp);
+    renderSubs();
+  });
+  // 监听新增
+  roomRef.child('submissions').on('child_added', snap => {
+    if (localWriteGuard) return;
+    const s = { id: snap.key, ...snap.val() };
+    if (!subs.find(x => x.id === s.id)) {
+      subs.unshift(s);
+      renderSubs();
+    }
+  });
+  // 监听点赞变化
+  roomRef.child('submissions').on('child_changed', snap => {
+    if (localWriteGuard) return;
+    const s = subs.find(x => x.id === snap.key);
+    if (s) {
+      s.likes = snap.val().likes;
+      renderSubs();
+    }
+  });
+}
+
+function updateLikeInFB(subId, likes) {
+  if (!roomRef) return;
+  localWriteGuard = true;
+  roomRef.child('submissions/' + subId + '/likes').set(likes);
+  setTimeout(() => { localWriteGuard = false; }, 200);
+}
+
 // ─── 二维码 ───
 function initQR() {
   const base = location.href.split('?')[0];
-  const audienceUrl = base + '?mode=audience';
-  document.getElementById('qr-url-display').textContent = audienceUrl;
+  const qrContainer = document.getElementById('qrcode-container');
+  const qrUrlEl = document.getElementById('qr-url-display');
+  const code = roomCode || '';
+  const audienceUrl = base + '?mode=audience' + (code ? '&room=' + code : '');
+  qrUrlEl.textContent = audienceUrl;
+  qrContainer.innerHTML = '';
   try {
-    new QRCode(document.getElementById('qrcode-container'), {
+    new QRCode(qrContainer, {
       text: audienceUrl, width: 200, height: 200,
       colorDark: '#333', colorLight: '#fff', correctLevel: QRCode.CorrectLevel.M
     });
   } catch (e) {
-    document.getElementById('qrcode-container').innerHTML =
-      '<p style="font-size:14px;color:#FF6B00">二维码生成失败<br>请复制上方链接分享</p>';
+    qrContainer.innerHTML = '<p style="font-size:14px;color:#FF6B00">二维码生成失败<br>请复制上方链接分享</p>';
   }
 }
 
@@ -66,11 +193,24 @@ function showView(name) {
   window.scrollTo(0, 0);
 }
 
+// ─── 生成房间号 ───
+function generateRoomCode() {
+  return Math.random().toString(36).substring(2, 6).toUpperCase();
+}
+
 // ─── 倒计时 ───
 function startCountdown() {
   role = 'host';
+  // 生成房间号并初始化 Firebase
+  if (firebaseReady && !roomCode) {
+    roomCode = generateRoomCode();
+    initRoomRef();
+    initQR(); // 更新二维码带上房间号
+    // 清理旧数据
+    if (roomRef) roomRef.remove();
+  }
   showView('rule');
-  document.getElementById('rule-countdown-label').textContent = '游戏即将开始';
+  document.getElementById('rule-countdown-label').textContent = '房间号: ' + (roomCode || '本地') + ' · 游戏即将开始';
   let n = 30;
   const el = document.getElementById('countdown-num');
   el.textContent = n; el.className = 'countdown-num';
@@ -87,7 +227,7 @@ function startCountdown() {
 function enterAudienceGame() {
   role = 'audience';
   showView('rule');
-  document.getElementById('rule-countdown-label').textContent = '📱 观众模式 · 即将进入游戏';
+  document.getElementById('rule-countdown-label').textContent = '📱 观众模式 · 房间: ' + (roomCode || '本地') + ' · 即将进入游戏';
   let n = 10;
   const el = document.getElementById('countdown-num');
   el.textContent = n; el.className = 'countdown-num';
@@ -101,7 +241,10 @@ function enterAudienceGame() {
 }
 
 function enterAudienceFromHome() {
-  location.href = location.href.split('?')[0] + '?mode=audience';
+  const base = location.href.split('?')[0];
+  const params = ['mode=audience'];
+  if (roomCode) params.push('room=' + roomCode);
+  location.href = base + '?' + params.join('&');
 }
 
 // ─── 初始化游戏 ───
@@ -113,16 +256,28 @@ function initGame() {
   story = `高三学生小明睡过头了，闹钟响了三遍都没听到。
 当他终于醒来时，距离高考开始只剩30分钟！
 而考场在城市的另一端，正常情况下需要40分钟车程...`;
-  subs = getMockSubs(1);
-  if (role === 'audience') {
-    subs.push({
-      id: 'aud_init_1', content: '趁闹钟刚响赶紧出门，别磨蹭！',
-      likes: 6, timestamp: Date.now() - 30000, userName: '热心观众'
-    });
+
+  // 同步模式：host 写初始状态 + 监听投稿；audience 已通过 listenGameFromFB 监听
+  if (role === 'host' && firebaseReady && roomRef) {
+    subs = getMockSubs(1); // 初始种子投稿
+    syncGameToFB();
+    listenSubsFromFB();
+    showView('game');
+    updateUI();
+    // 把种子投稿也推上去
+    subs.forEach(s => pushSubToFB(s));
+    // 不运行模拟器，等真实观众投稿
+  } else if (role === 'host') {
+    // 本地模式
+    subs = getMockSubs(1);
+    showView('game');
+    updateUI();
+    startSim();
+  } else {
+    // 观众模式
+    showView('game');
+    updateUI();
   }
-  showView('game');
-  updateUI();
-  if (role === 'host') startSim();
 }
 
 // ─── UI刷新 ───
@@ -132,15 +287,12 @@ function updateUI() {
   document.getElementById('submission-count').textContent = '🔥 ' + subs.length + '条投稿';
   document.getElementById('submission-count-sm').textContent = '共 ' + subs.length + ' 条';
 
-  // 角色
   const roleEl = document.getElementById('role-badge');
   roleEl.textContent = role === 'host' ? '🎬 主持人' : '📱 观众';
   roleEl.className = 'role-badge ' + (role === 'host' ? 'role-host' : 'role-audience');
 
-  // 观众输入区
   document.getElementById('audience-input-card').style.display = role === 'audience' ? '' : 'none';
 
-  // 阶段提示
   const phEl = document.getElementById('header-phase');
   if (phase === 'branch') {
     phEl.textContent = '🔀 请选择一个路线';
@@ -165,18 +317,19 @@ function updateUI() {
 // ─── 剧情 ───
 function renderStory() {
   let t = cleanStory(story);
+  const btn = document.getElementById('toggle-story-btn');
   if (rnd > 1 && !storyOpen) {
     const lines = t.split('\n');
     if (lines.length > 8) {
       t = lines.slice(0, 3).join('\n') + '\n\n··· 以上剧情已折叠 ···\n\n' + lines.slice(-4).join('\n');
-      document.getElementById('toggle-story-btn').style.display = '';
-      document.getElementById('toggle-story-btn').textContent = '▼ 展开完整剧情';
+      btn.style.display = '';
+      btn.textContent = '▼ 展开完整剧情';
     } else {
-      document.getElementById('toggle-story-btn').style.display = 'none';
+      btn.style.display = 'none';
     }
   } else {
-    document.getElementById('toggle-story-btn').style.display = rnd > 1 ? '' : 'none';
-    document.getElementById('toggle-story-btn').textContent = storyOpen ? '▲ 收起' : '▼ 展开完整剧情';
+    btn.style.display = rnd > 1 ? '' : 'none';
+    btn.textContent = storyOpen ? '▲ 收起' : '▼ 展开完整剧情';
   }
   document.getElementById('story-text').textContent = t;
 }
@@ -185,6 +338,7 @@ function toggleStory() {
   storyOpen = !storyOpen;
   document.getElementById('story-text').textContent = cleanStory(story);
   document.getElementById('toggle-story-btn').textContent = storyOpen ? '▲ 收起' : '▼ 展开完整剧情';
+  if (role === 'host') syncGameToFB();
 }
 
 function cleanStory(s) {
@@ -219,14 +373,23 @@ function submitAudienceTip() {
   const text = input.value.trim();
   if (!text) return;
   if (text.length > 200) { alert('最多200字'); return; }
-  subs.push({
-    id: 'tip_' + Date.now(), content: text, likes: 0,
-    timestamp: Date.now(),
+  const sub = {
+    content: text, likes: 0, timestamp: Date.now(),
     userName: audienceNick || ('观众' + Math.floor(Math.random() * 9000 + 1000))
-  });
+  };
   input.value = '';
-  updateUI();
+
+  if (firebaseReady && roomRef) {
+    // 同步模式：推到 Firebase
+    pushSubToFB(sub);
+  } else {
+    // 本地模式
+    subs.unshift({ id: 'tip_' + Date.now(), ...sub });
+    updateUI();
+  }
   document.getElementById('submissions-card').scrollIntoView({ behavior: 'smooth' });
+  // 字符计数重置
+  document.getElementById('char-count').textContent = '0/200';
 }
 
 // ─── 触发AI ───
@@ -237,6 +400,7 @@ async function triggerAI(strategy) {
   if (!picked) { alert('请先让观众投稿！'); return; }
   aiBusy = true;
   updateStrategyBtns();
+  if (firebaseReady && roomRef) syncGameToFB();
   showAIModal(true);
   try {
     const res = await callAI(story, picked.content, rnd);
@@ -246,6 +410,7 @@ async function triggerAI(strategy) {
       outcome = res.finalOutcome || '';
       storyOpen = false;
       phase = 'branch';
+      if (firebaseReady && roomRef) syncGameToFB();
       updateUI();
     } else {
       alert('AI生成失败: ' + (res.error || '请重试'));
@@ -255,6 +420,7 @@ async function triggerAI(strategy) {
   } finally {
     aiBusy = false;
     showAIModal(false);
+    if (firebaseReady && roomRef) syncGameToFB();
     if (phase === 'input') updateUI();
   }
 }
@@ -263,41 +429,25 @@ function showAIModal(show) {
   document.getElementById('ai-loading-modal').style.display = show ? 'flex' : 'none';
 }
 
-// ─── AI调用（单次请求，不再重试） ───
+// ─── AI调用（含30秒超时） ───
 async function callAI(curStory, selInput, roundNum) {
   const theme = getTheme(roundNum);
   const consist = buildConsistency(curStory, selInput);
   let preOutcome = '';
   if (roundNum === 4) preOutcome = Math.random() < 0.6 ? '失败' : '成功';
 
-  const playerConst = `
-🔴【硬性约束 — 玩家行动已发生，绝不可推翻】🔴
-小明已经做了以下事情（已发生的事实）：${selInput}
+  const playerConst = `\n🔴【硬性约束 — 玩家行动已发生，绝不可推翻】🔴\n小明已经做了以下事情（已发生的事实）：${selInput}\n\n你的任务：延续这个已发生的事实展开。\n\n绝对禁止：分支中出现与已执行行动矛盾的交通工具/出行方式。\n例如玩家选了"爸爸开车送"，分支绝不能写"骑单车""跑步""打车"等。\n正确做法：分支围绕"当前状态下遇到什么情况"展开（如堵车/抄近路/抛锚/封路等）。`;
 
-你的任务：延续这个已发生的事实展开。
-
-绝对禁止：分支中出现与已执行行动矛盾的交通工具/出行方式。
-例如玩家选了"爸爸开车送"，分支绝不能写"骑单车""跑步""打车"等。
-正确做法：分支围绕"当前状态下遇到什么情况"展开（如堵车/抄近路/抛锚/封路等）。`;
-
-  const sys = `你是写实故事作家。续写60字以内。
-
-${theme}
-${playerConst}
-${consist}
-
-格式（严格）：
-【故事续写】
-(在此续写)
-【分支一】标题：[5字内] 描述：[不少于10字] 难度：简单
-【分支二】标题：[5字内] 描述：[不少于10字] 难度：中等
-【分支三】标题：[5字内] 描述：[不少于10字] 难度：困难
-${roundNum === 4 ? '【结局判定】最终结局必须为【' + preOutcome + '】，严格按此写结局' : ''}`;
+  const sys = `你是写实故事作家。续写60字以内。\n\n${theme}\n${playerConst}\n${consist}\n\n格式（严格）：\n【故事续写】\n(在此续写)\n【分支一】标题：[5字内] 描述：[不少于10字] 难度：简单\n【分支二】标题：[5字内] 描述：[不少于10字] 难度：中等\n【分支三】标题：[5字内] 描述：[不少于10字] 难度：困难\n${roundNum === 4 ? '【结局判定】最终结局必须为【' + preOutcome + '】，严格按此写结局' : ''}`;
 
   const trimmed = curStory.length > 1200
     ? curStory.slice(0, 200) + '\n···（中间剧情已折叠）···\n' + curStory.slice(-1000)
     : curStory;
   const user = `已确定的行动：${selInput}\n当前剧情：${trimmed}`;
+
+  // ─── 30秒超时控制器 ───
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
 
   try {
     const resp = await fetch(ZHIPU, {
@@ -307,8 +457,11 @@ ${roundNum === 4 ? '【结局判定】最终结局必须为【' + preOutcome + '
         model: 'glm-4-flash',
         messages: [{ role: 'system', content: sys }, { role: 'user', content: user }],
         max_tokens: 500, temperature: 0.6
-      })
+      }),
+      signal: controller.signal
     });
+    clearTimeout(timeoutId);
+
     if (!resp.ok) return fail('API错误: ' + resp.status);
     const data = await resp.json();
     const txt = data.choices?.[0]?.message?.content || '';
@@ -320,6 +473,8 @@ ${roundNum === 4 ? '【结局判定】最终结局必须为【' + preOutcome + '
     if (roundNum === 4) oc = preOutcome === '成功' ? 'success' : 'failure';
     return { success: true, continuation: cont, branches: brs, finalOutcome: oc };
   } catch (e) {
+    clearTimeout(timeoutId);
+    if (e.name === 'AbortError') return fail('AI请求超时（30秒），请检查网络后重试');
     return fail('网络错误');
   }
 }
@@ -434,18 +589,24 @@ function pickBranch(id) {
       ? '在全场观众的帮助下，小明终于冲进了考场！\n\n他气喘吁吁坐到座位上，翻开试卷的那一刻，嘴角露出了微笑。\n\n这一路虽然惊险，但有你们的支持，他没有放弃！\n\n接下来，测测你的高考人格类型吧～'
       : '尽管拼尽全力，最终还是没能及时赶到。\n\n但这段经历让他学会了珍惜时间、在困境中做选择。\n\n别灰心！人生的路很长，这只是一个小插曲。\n\n来测测你的高考人格类型吧～';
     document.getElementById('outcome-modal').classList.add('show');
+    if (role === 'host' && firebaseReady && roomRef) syncGameToFB();
   } else {
     rnd++;
-    subs = getMockSubs(rnd);
-    if (role === 'audience') {
-      subs.unshift({
-        id: 'aud_sub_' + Date.now(), content: '加油小明！离考场越来越近了！',
-        likes: 3, timestamp: Date.now(), userName: audienceNick || '神秘观众'
-      });
+    if (role === 'host') {
+      subs = firebaseReady ? getMockSubs(rnd) : getMockSubs(rnd);
     }
     myLikeId = ''; branches = []; outcome = ''; storyOpen = false;
     phase = 'input';
     updateUI();
+    if (role === 'host') {
+      if (firebaseReady && roomRef) {
+        syncGameToFB();
+        // 推送新一轮种子投稿
+        subs.forEach(s => pushSubToFB(s));
+      } else if (!firebaseReady) {
+        startSim();
+      }
+    }
   }
 }
 
@@ -454,8 +615,9 @@ function closeOutcome() {
   startQuiz();
 }
 
-// ─── 模拟观众 ───
+// ─── 模拟观众（仅本地模式） ───
 function startSim() {
+  if (firebaseReady && roomRef) return; // 同步模式下不模拟
   stopSim();
   var names = ['高三·阿杰','高三·小美','高三·大壮','学霸同桌','卷王','佛系少女',
     '送考爸爸','隔壁班老王','吃瓜群众','追梦少年','热心市民','语文课代表'];
@@ -506,16 +668,28 @@ function renderSubs() {
     '</button>' +
     '</div></div>';
   }).join('');
+  // 更新顶部计数
+  document.getElementById('submission-count').textContent = '🔥 ' + subs.length + '条投稿';
+  document.getElementById('submission-count-sm').textContent = '共 ' + subs.length + ' 条';
 }
 
 function doLike(id) {
+  var s = subs.find(function(x) { return x.id === id; });
+  if (!s) return;
   if (myLikeId === id) {
-    var s = subs.find(function(x) { return x.id === id; }); if (s) s.likes = Math.max(0, s.likes - 1);
+    s.likes = Math.max(0, s.likes - 1);
     myLikeId = '';
   } else {
-    if (myLikeId) { var o = subs.find(function(x) { return x.id === myLikeId; }); if (o) o.likes = Math.max(0, o.likes - 1); }
-    var s = subs.find(function(x) { return x.id === id; }); if (s) s.likes++;
+    if (myLikeId) {
+      var o = subs.find(function(x) { return x.id === myLikeId; });
+      if (o) o.likes = Math.max(0, o.likes - 1);
+    }
+    s.likes++;
     myLikeId = id;
+  }
+  // 同步到 Firebase
+  if (firebaseReady && roomRef) {
+    updateLikeInFB(id, s.likes);
   }
   renderSubs();
 }
