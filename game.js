@@ -12,13 +12,13 @@ const ZHIPU_KEY = '7bf6eb414d39415baf72cd7ca57f56a1.StEPo8uIFfPtfTvf';
 // 2. 启用 Realtime Database（选择测试模式/允许读写）
 // 3. 将下面的配置替换为你的项目配置
 const FIREBASE_CONFIG = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT.firebaseapp.com",
-  databaseURL: "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_PROJECT.appspot.com",
-  messagingSenderId: "YOUR_SENDER_ID",
-  appId: "YOUR_APP_ID"
+  apiKey: "AIzaSyAvIHuLIIg2XdgEmJjtaB3_b0qisj5q1cU",
+  authDomain: "gaokao-8cba2.firebaseapp.com",
+  databaseURL: "https://gaokao-8cba2-default-rtdb.firebaseio.com",
+  projectId: "gaokao-8cba2",
+  storageBucket: "gaokao-8cba2.firebasestorage.app",
+  messagingSenderId: "611236689106",
+  appId: "1:611236689106:web:9b3ea640766fe4574c690b"
 };
 
 // ─── Firebase 实例 ───
